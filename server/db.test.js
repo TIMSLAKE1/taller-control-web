@@ -38,10 +38,12 @@ test('migra la tabla anterior, permite un solo encargado inicial y revoca sesion
 
   const manager = createInitialManager({ email: 'encargado@taller.test', displayName: 'Encargado Inicial', password: ephemeralPassword() });
   assert.equal(manager.role, 'manager');
+  assert.equal(manager.is_technician, true);
   assert.throws(() => createInitialManager({ email: 'otro@taller.test', displayName: 'Otro encargado', password: ephemeralPassword() }), /ya existe/);
 
   const mechanic = createMechanic({ email: 'tecnico@taller.test', displayName: 'Técnico Uno', password: ephemeralPassword() });
   assert.equal(mechanic.role, 'mechanic');
+  assert.equal(mechanic.is_technician, true);
   assert.equal(listMechanics().length, 2);
   assert.equal(listMechanics().some((person) => person.id === 'legacy-mechanic-id'), true);
 

@@ -26,7 +26,7 @@ Si el firewall de la computadora lo solicita, permite el puerto TCP 3000 únicam
 
 ## Administrar técnicos autorizados
 
-No existe registro público. Una vez iniciada la sesión como encargado, abre el perfil de la parte inferior izquierda para agregar técnicos: captura su nombre, correo y una contraseña inicial de al menos 12 caracteres, y compártela con la persona por un canal privado. Desde esa misma pantalla puedes desactivar o reactivar cuentas. Desactivar revoca sus sesiones activas; los registros históricos permanecen. Los técnicos no pueden administrar cuentas. La cuenta del encargado inicial se crea únicamente con `npm run manager:init`; cuando ya existe, ese comando no vuelve a funcionar.
+No existe registro público. El encargado inicial también es un técnico autorizado y puede usar las seis secciones operativas. Una vez iniciada su sesión, abre el perfil de la parte inferior izquierda para agregar técnicos: captura su nombre, correo y una contraseña inicial de al menos 12 caracteres, y compártela con la persona por un canal privado. Desde esa misma pantalla puedes desactivar o reactivar las cuentas de los técnicos; la cuenta del encargado no se puede desactivar ahí. Desactivar a un técnico revoca sus sesiones activas, pero conserva sus registros históricos. Los técnicos no pueden administrar cuentas. La cuenta del encargado inicial se crea únicamente con `npm run manager:init`; cuando ya existe, ese comando no vuelve a funcionar.
 
 ## Datos y separación de la demo
 

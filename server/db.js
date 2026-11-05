@@ -86,7 +86,11 @@ export function getDatabase() { return db; }
 export function nowIso() { return new Date().toISOString(); }
 export function hashToken(token) { return createHash('sha256').update(token).digest('hex'); }
 export function publicUser(user) {
-  return { id: user.id, email: user.email, display_name: user.display_name, role: Number(user.is_manager) === 1 ? 'manager' : user.role };
+  return {
+    id: user.id, email: user.email, display_name: user.display_name,
+    role: Number(user.is_manager) === 1 ? 'manager' : user.role,
+    is_technician: user.role === 'mechanic'
+  };
 }
 
 export function createMechanic({ email, displayName, password }) {

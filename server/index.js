@@ -108,6 +108,7 @@ function getSession(req) {
 function requireMechanic(req) {
   const session = getSession(req);
   if (!session) fail(401, 'Inicia sesión con una cuenta de técnico mecánico.');
+  // El encargado inicial mantiene además el rol técnico y usa las mismas funciones operativas.
   if (session.role !== 'mechanic') fail(403, 'Esta cuenta no tiene permiso para usar el taller.');
   return session;
 }
