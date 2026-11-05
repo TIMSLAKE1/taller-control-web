@@ -12,10 +12,10 @@
 - Probar el respaldo completo de `data/` con el servidor detenido, y ensayar la recuperación antes de usar estos datos como único expediente.
 - Definir quién puede acceder físicamente a la computadora, a la carpeta `data/` y a los medios de respaldo.
 
-## 3. Reforzar el acceso de red para producción
+## 3. Configurar la red del taller
 
-- El servidor se ejecuta en la red local, pero HTTP no cifra la información que viaja entre la computadora del servidor y los dispositivos. Mantenerlo solo en una red privada y confiable; no abrir ni reenviar el puerto 3000 a Internet.
-- Si se requiere usarlo en una red no confiable, configurar HTTPS local y validar certificados en los dispositivos antes de transmitir datos reales.
+- El servidor ahora admite HTTPS local mediante `TALLER_TLS_CERT` y `TALLER_TLS_KEY`; antes de usar datos reales, aprovisionar un certificado cuyo nombre o IP coincida con la dirección del servidor e instalar su autoridad certificadora como confiable en todos los dispositivos cliente. La guía está en `README.md`.
+- Hasta que todos los dispositivos validen el certificado, limitar el acceso a una red privada y confiable, con firewall restringido al perfil privado y a la subred del taller. No abrir ni reenviar el puerto 3000 a Internet.
 - Revisar reglas de firewall, actualizaciones del sistema y la política de conservación de datos personales del taller.
 
 ## 4. Acordar el alcance operativo pendiente

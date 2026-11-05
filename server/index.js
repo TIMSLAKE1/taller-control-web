@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { spawn } from 'node:child_process';
 import { BlockList, isIP } from 'node:net';
 import { readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -16,6 +17,13 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const distDir = path.join(root, 'dist');
 const host = process.env.TALLER_HOST || '0.0.0.0';
 const port = Number(process.env.PORT || process.env.TALLER_PORT || 3000);
+const tlsCertPath = process.env.TALLER_TLS_CERT || '';
+const tlsKeyPath = process.env.TALLER_TLS_KEY || '';
+if (Boolean(tlsCertPath) !== Boolean(tlsKeyPath)) {
+  throw new Error('Para activar HTTPS local, configura juntos TALLER_TLS_CERT y TALLER_TLS_KEY.');
+}
+const secureTransport = Boolean(tlsCertPath && tlsKeyPath);
+const protocol = secureTransport ? 'https' : 'http';
 const sessionDurationMs = 12 * 60 * 60 * 1000;
 const maxJsonBytes = 2 * 1024 * 1024;
 const maxPhotoBytes = 10 * 1024 * 1024;
@@ -23,6 +31,13 @@ const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'ima
 const validStatuses = new Set(['Borrador', 'Inspección', 'Aprobación', 'En servicio', 'Completa', 'Cancelada']);
 const loginAttempts = new Map();
 let loginChecks = 0;
+const securityHeaders = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self'"
+};
+if (secureTransport) securityHeaders['Strict-Transport-Security'] = 'max-age=31536000';
 const trustedLan = new BlockList();
 for (const [subnet, prefix, type] of [
   ['10.0.0.0', 8, 'ipv4'], ['172.16.0.0', 12, 'ipv4'], ['192.168.0.0', 16, 'ipv4'],
@@ -42,7 +57,7 @@ function sendJson(res, status, value, extraHeaders = {}) {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': body.length,
     'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
+    ...securityHeaders,
     ...extraHeaders
   });
   res.end(body);
@@ -180,7 +195,7 @@ function serveStatic(req, res, pathname) {
     'Content-Type': mimeType(filePath),
     'Content-Length': body.length,
     'Cache-Control': filePath.endsWith('index.html') ? 'no-cache' : 'public, max-age=3600',
-    'X-Content-Type-Options': 'nosniff'
+    ...securityHeaders
   });
   res.end(req.method === 'HEAD' ? undefined : body);
 }
@@ -386,17 +401,17 @@ async function handleApi(req, res, pathname) {
     const filePath = path.join(evidenceDir, `${photoId}.blob`);
     let file;
     try { file = readFileSync(filePath); } catch { fail(404, 'No se encontró el archivo de imagen.'); }
-    res.writeHead(200, { 'Content-Type': photo.media_type, 'Content-Length': file.length, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
+    res.writeHead(200, { 'Content-Type': photo.media_type, 'Content-Length': file.length, 'Cache-Control': 'private, no-store', ...securityHeaders });
     return res.end(file);
   }
 
   return sendJson(res, 404, { error: 'Ruta de servicio no encontrada.' });
 }
 
-const server = createServer(async (req, res) => {
+const requestHandler = async (req, res) => {
   if (!isTrustedLanAddress(req.socket.remoteAddress)) return sendJson(res, 403, { error: 'El servidor solo acepta conexiones desde la red privada local.' });
   let url;
-  try { url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`); }
+  try { url = new URL(req.url || '/', `${protocol}://${req.headers.host || 'localhost'}`); }
   catch { return sendJson(res, 400, { error: 'La solicitud contiene un encabezado Host inválido.' }); }
   const pathname = url.pathname;
   if (pathname.startsWith('/api/')) {
@@ -411,7 +426,10 @@ const server = createServer(async (req, res) => {
   if ((req.method === 'GET' || req.method === 'HEAD') && pathname.startsWith('/api')) return sendJson(res, 404, { error: 'Ruta de servicio no encontrada.' });
   if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'Método no permitido.' });
   serveStatic(req, res, pathname);
-});
+};
+const server = secureTransport
+  ? createHttpsServer({ key: readFileSync(tlsKeyPath), cert: readFileSync(tlsCertPath), minVersion: 'TLSv1.2' }, requestHandler)
+  : createServer(requestHandler);
 
 function openLocalBrowser(url) {
   if (process.env.TALLER_NO_OPEN_BROWSER === '1') return;
@@ -432,17 +450,19 @@ server.on('error', (error) => {
 });
 server.listen(port, host, () => {
   console.log(`Taller Control con SQLite está escuchando en:`);
-  console.log(`  http://localhost:${port}`);
+  console.log(`  ${protocol}://localhost:${port}`);
   for (const addresses of Object.values(os.networkInterfaces())) {
     for (const address of addresses || []) {
-      if (address.family === 'IPv4' && !address.internal && trustedLan.check(address.address, 'ipv4')) console.log(`  http://${address.address}:${port}`);
+      if (address.family === 'IPv4' && !address.internal && trustedLan.check(address.address, 'ipv4')) console.log(`  ${protocol}://${address.address}:${port}`);
     }
   }
   console.log(`Base de datos local: ${path.join(dataDir, 'taller-control.sqlite')}`);
   console.log('Solo las cuentas autorizadas de encargado y técnicos pueden consultar los datos.');
+  if (secureTransport) console.log('HTTPS está activo. Los dispositivos deben confiar en el certificado local antes de iniciar sesión.');
+  else console.warn('Aviso: HTTP no cifra las credenciales ni los datos en la red local. Usa únicamente una red privada y confiable.');
   if (process.env.TALLER_NO_OPEN_BROWSER !== '1') {
     console.log('Abriendo la pantalla de acceso en este equipo…');
-    openLocalBrowser(`http://localhost:${port}`);
+    openLocalBrowser(`${protocol}://localhost:${port}`);
   }
 });
 
