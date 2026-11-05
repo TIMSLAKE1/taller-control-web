@@ -342,12 +342,6 @@ function addExtraUi() {
   if (draftBtn) { draftBtn.id = 'saveDraftBtn'; draftBtn.removeAttribute('data-toast'); }
   const filterbar = $('#orderList .filterbar');
   if (filterbar && !$('#exportOrdersBtn')) filterbar.insertAdjacentHTML('beforeend', '<button class="btn btn-light btn-small" id="exportOrdersBtn">Exportar CSV</button>');
-  const reportTabs = $('.report-tabs');
-  if (reportTabs && !$('#expenseTab')) reportTabs.insertAdjacentHTML('beforeend', '<button class="report-tab" id="expenseTab" data-panel="expenses">Gastos reales del taller</button>');
-  const reportPanels = $$('.report-panel');
-  if (!$('#panel-expenses') && reportPanels.length) {
-    reportPanels[reportPanels.length - 1].insertAdjacentHTML('afterend', `<div class="report-panel" id="panel-expenses"><div class="expense-toolbar"><div><div class="eyebrow"><span class="dot"></span>Registro operativo</div><h2 class="card-title">Gastos reales del taller</h2><div class="card-meta">Captura manual; separado del presupuesto estimado del proyecto.</div></div><button class="btn btn-teal" id="addExpenseBtn"><svg><use href="#i-plus"/></svg>Registrar gasto</button></div><div class="report-extra-kpis" id="expenseKpis"></div><div class="card"><div class="card-head"><div><h3 class="card-title">Movimientos registrados</h3><div class="card-meta">Puedes exportar esta lista para revisión.</div></div><button class="btn btn-light btn-small" id="exportExpensesBtn">Exportar CSV</button></div><div class="table-wrap"><table class="expense-table"><thead><tr><th>Fecha</th><th>Concepto</th><th>Rubro</th><th>Orden</th><th>Importe</th><th></th></tr></thead><tbody id="expensesBody"></tbody></table></div><div class="empty-state" id="expensesEmpty" hidden>No hay gastos reales registrados todavía.</div></div><div class="report-callout"><strong>Separación importante:</strong> los $43,395 MXN del presupuesto del proyecto y el plan de cinco semanas se conservan como supuestos de planeación. Esta pestaña solo contiene gastos del taller que el usuario registre.</div></div>`);
-  }
   if (publicDemoBuild && !$('#resetDemoBtn')) {
     const banner = $('#view-home .demo-banner');
     if (banner) banner.insertAdjacentHTML('afterend', '<button type="button" class="demo-reset" id="resetDemoBtn">Restablecer el registro ficticio de demostración</button>');
@@ -885,7 +879,7 @@ function renderExpenses() {
   }).reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
   const avg = expenses.length ? total / expenses.length : 0;
   const kpis = $('#expenseKpis');
-  if (kpis) kpis.innerHTML = `<article class="card mini-kpi"><div class="kpi-label">Gasto registrado</div><div class="kpi-value">${escapeHtml(money(total))}</div><div class="kpi-foot">${expenses.length} movimiento(s)</div></article><article class="card mini-kpi"><div class="kpi-label">Este mes</div><div class="kpi-value">${escapeHtml(money(monthly))}</div><div class="kpi-foot">Gastos por fecha de captura</div></article><article class="card mini-kpi"><div class="kpi-label">Promedio por movimiento</div><div class="kpi-value">${escapeHtml(money(avg))}</div><div class="kpi-foot">Solo registros reales agregados</div></article>`;
+  if (kpis) kpis.innerHTML = `<article class="card mini-kpi"><div class="kpi-label">Acumulado</div><div class="kpi-value">${escapeHtml(money(total))}</div><div class="kpi-foot">${expenses.length} gasto(s) registrado(s)</div></article><article class="card mini-kpi"><div class="kpi-label">Este mes</div><div class="kpi-value">${escapeHtml(money(monthly))}</div><div class="kpi-foot">Según la fecha del gasto</div></article><article class="card mini-kpi"><div class="kpi-label">Promedio por gasto</div><div class="kpi-value">${escapeHtml(money(avg))}</div><div class="kpi-foot">Solo movimientos capturados</div></article>`;
   const body = $('#expensesBody');
   const empty = $('#expensesEmpty');
   if (!body) return;
@@ -1036,10 +1030,6 @@ function registerEvents() {
   $('#requestChangesDemo')?.addEventListener('click', () => recordDecision(false));
   $('#closeModal')?.addEventListener('click', () => $('#modalBackdrop').classList.remove('open'));
   $('#modalBackdrop')?.addEventListener('click', (event) => { if (event.target === $('#modalBackdrop')) $('#modalBackdrop').classList.remove('open'); });
-  $$('.report-tab').forEach((button) => button.addEventListener('click', () => {
-    $$('.report-tab').forEach((tab) => tab.classList.toggle('active', tab === button));
-    $$('.report-panel').forEach((panel) => panel.classList.toggle('active', panel.id === `panel-${button.dataset.panel}`));
-  }));
   $('#addExpenseBtn')?.addEventListener('click', openExpenseModal);
   $('#expenseForm')?.addEventListener('submit', saveExpense);
   $('#closeExpense')?.addEventListener('click', closeExpenseModal);

@@ -70,7 +70,5 @@ Esta instalación está diseñada para funcionar en la red privada del taller. E
 - Inspección de kilometraje, combustible, condición, fluidos, accesorios, documentos, objetos declarados y fotos.
 - Búsqueda, filtros, cambios de estado, vista imprimible/PDF y exportación CSV.
 - Registro interno de solicitud y respuesta de aprobación; no envía mensajes ni crea una firma electrónica.
-- Reporte de planeación y captura separada de gastos reales.
+- Registro de gastos reales del taller, resumen por periodo, asociación opcional a una orden y exportación CSV.
 - PWA instalable; el service worker solo almacena recursos públicos de la interfaz y nunca guarda en caché respuestas de la API ni fotos privadas.
-
-El presupuesto de $43,395 MXN y el calendario de cinco semanas que aparecen en Reportes son supuestos de planeación del prototipo, no gastos reales ni una cotización aceptada.

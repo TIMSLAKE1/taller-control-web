@@ -22,7 +22,6 @@
 
 - La aprobación del cliente sigue siendo un registro interno; la app no envía WhatsApp/correo ni obtiene una firma electrónica. Definir canal, proveedor, consentimiento, requisitos legales y cualquier costo antes de integrar comunicaciones.
 - La aplicación no se configura para iniciar automáticamente ni para alojarse permanentemente. Si más adelante se requiere arranque automático, definir primero responsable, mantenimiento, respaldo y controles de acceso del equipo.
-- Los $43,395 MXN, cinco semanas, 240 horas y nombres que se muestran en Reportes son supuestos del plan del prototipo; confirmar o retirar si ya no son pertinentes.
 
 ## Límites deliberados de esta versión
 
