@@ -1,5 +1,3 @@
-import { createClient } from '@supabase/supabase-js';
-
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const escapeHtml = (value = '') => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -16,10 +14,11 @@ const fmtDate = (value, options = { dateStyle: 'medium', timeStyle: 'short' }) =
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? String(value) : new Intl.DateTimeFormat('es-MX', options).format(date);
 };
-const localMode = !import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_ANON_KEY;
-const LOCAL_ORDERS_KEY = 'taller-control.orders.v1';
-const LOCAL_EXPENSES_KEY = 'taller-control.expenses.v1';
-const LOCAL_BUDGET_KEY = 'taller-control.budget.v1';
+const publicDemoBuild = import.meta.env.MODE === 'public-demo';
+const localMode = publicDemoBuild || !import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_ANON_KEY;
+const STORAGE_PREFIX = publicDemoBuild ? 'taller-control.demo' : 'taller-control';
+const LOCAL_ORDERS_KEY = `${STORAGE_PREFIX}.orders.v1`;
+const LOCAL_EXPENSES_KEY = `${STORAGE_PREFIX}.expenses.v1`;
 const STATUSES = ['Borrador', 'Inspección', 'Aprobación', 'En servicio', 'Completa', 'Cancelada'];
 const REASONS = ['Mantenimiento', 'Reparación', 'Diagnóstico'];
 const FLUID_NAMES = ['Aceite de motor', 'Refrigerante', 'Líquido de frenos', 'Dirección hidráulica', 'Limpiaparabrisas', 'Transmisión'];
@@ -116,7 +115,7 @@ function notify(message) {
 }
 function setProfile() {
   const name = workshop?.name || (user?.email ? user.email.split('@')[0] : 'Equipo de taller');
-  const role = user ? (workshop ? 'Sesión Supabase' : 'Configura tu taller') : (localMode ? 'Modo local · prueba' : 'Sin iniciar sesión');
+  const role = user ? (workshop ? 'Sesión Supabase' : 'Configura tu taller') : (publicDemoBuild ? 'Demo ficticia' : localMode ? 'Modo local · este dispositivo' : 'Sin iniciar sesión');
   const nameEl = $('.profile-name');
   const roleEl = $('.profile-role');
   if (nameEl) nameEl.textContent = name;
@@ -141,7 +140,7 @@ function approvalLabel(order) {
   return ({ not_requested: 'Sin solicitar', pending: 'Pendiente', approved: 'Aprobada', changes_requested: 'Cambios solicitados' })[order.approval_status] || 'Sin solicitar';
 }
 function orderTitle(order) { return `${order.vehicle?.make || ''} ${order.vehicle?.model || ''}`.trim() || 'Vehículo sin identificar'; }
-function orderNumber(order) { return order.order_number || 'OS-0001'; }
+function orderNumber(order) { return order.order_number || 'Sin folio'; }
 function routeOrder(id, view = 'inspection') {
   const order = orders.find((item) => item.id === id);
   if (!order) return;
@@ -155,15 +154,16 @@ const backend = {
   async boot() {
     if (localMode) {
       orders = readLocal(LOCAL_ORDERS_KEY, null);
-      if (!orders) {
-        orders = [demoOrder()];
-        writeLocal(LOCAL_ORDERS_KEY, orders);
-      }
+      if (!Array.isArray(orders)) orders = publicDemoBuild ? [demoOrder()] : [];
+      if (publicDemoBuild && orders.length === 0) orders = [demoOrder()];
+      if (!publicDemoBuild) orders = orders.filter((order) => !order.is_demo && !String(order.id || '').startsWith('demo-'));
+      writeLocal(LOCAL_ORDERS_KEY, orders);
       expenses = readLocal(LOCAL_EXPENSES_KEY, []);
       setConnection(navigator.onLine ? 'Modo local' : 'Sin conexión', navigator.onLine ? 'local' : 'offline');
       setProfile();
       return true;
     }
+    const { createClient } = await import('@supabase/supabase-js');
     client = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
     });
@@ -369,9 +369,9 @@ function addExtraUi() {
   if (!$('#panel-expenses') && reportPanels.length) {
     reportPanels[reportPanels.length - 1].insertAdjacentHTML('afterend', `<div class="report-panel" id="panel-expenses"><div class="expense-toolbar"><div><div class="eyebrow"><span class="dot"></span>Registro operativo</div><h2 class="card-title">Gastos reales del taller</h2><div class="card-meta">Captura manual; separado del presupuesto estimado del proyecto.</div></div><button class="btn btn-teal" id="addExpenseBtn"><svg><use href="#i-plus"/></svg>Registrar gasto</button></div><div class="report-extra-kpis" id="expenseKpis"></div><div class="card"><div class="card-head"><div><h3 class="card-title">Movimientos registrados</h3><div class="card-meta">Puedes exportar esta lista para revisión.</div></div><button class="btn btn-light btn-small" id="exportExpensesBtn">Exportar CSV</button></div><div class="table-wrap"><table class="expense-table"><thead><tr><th>Fecha</th><th>Concepto</th><th>Rubro</th><th>Orden</th><th>Importe</th><th></th></tr></thead><tbody id="expensesBody"></tbody></table></div><div class="empty-state" id="expensesEmpty" hidden>No hay gastos reales registrados todavía.</div></div><div class="report-callout"><strong>Separación importante:</strong> los $43,395 MXN del presupuesto del proyecto y el plan de cinco semanas se conservan como supuestos de planeación. Esta pestaña solo contiene gastos del taller que el usuario registre.</div></div>`);
   }
-  if (!$('#resetDemoBtn')) {
+  if (publicDemoBuild && !$('#resetDemoBtn')) {
     const banner = $('#view-home .demo-banner');
-    if (banner) banner.insertAdjacentHTML('afterend', '<button type="button" class="demo-reset" id="resetDemoBtn">Restablecer la prueba ficticia (borra datos locales de este navegador)</button>');
+    if (banner) banner.insertAdjacentHTML('afterend', '<button type="button" class="demo-reset" id="resetDemoBtn">Restablecer el registro ficticio de demostración</button>');
   }
   if (!$('#expenseModal')) document.body.insertAdjacentHTML('beforeend', `<div class="modal-backdrop" id="expenseModal"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="expenseTitle"><div class="modal-head"><h2 id="expenseTitle">Registrar gasto real</h2><button class="icon-btn" type="button" id="closeExpense" aria-label="Cerrar">×</button></div><form id="expenseForm"><div class="field-grid"><div class="field"><label for="expenseDate">Fecha</label><input id="expenseDate" type="date" required /></div><div class="field"><label for="expenseCategory">Rubro</label><select id="expenseCategory" required>${CATEGORIES.map((category) => `<option>${escapeHtml(category)}</option>`).join('')}</select></div><div class="field full"><label for="expenseDescription">Descripción</label><input id="expenseDescription" maxlength="160" required placeholder="Ej. Compra de refacciones" /></div><div class="field"><label for="expenseAmount">Importe (MXN)</label><input id="expenseAmount" type="number" min="0.01" step="0.01" inputmode="decimal" required /></div><div class="field"><label for="expenseOrder">Orden relacionada</label><select id="expenseOrder"><option value="">Sin orden</option></select></div></div><div class="modal-actions"><button class="btn btn-light" type="button" id="cancelExpense">Cancelar</button><button class="btn btn-teal" type="submit">Guardar gasto</button></div></form></div></div>`);
 }
@@ -460,7 +460,7 @@ function validateReception() {
   return true;
 }
 async function saveReception(next = 'draft') {
-  if (!validateReception()) return null;
+  if ((next !== 'draft' || !localMode) && !validateReception()) return null;
   const previous = orderById(activeOrderId) || {};
   const order = readForm(previous);
   if (next === 'draft' && !previous.status) order.status = 'Borrador';
@@ -473,6 +473,14 @@ async function saveReception(next = 'draft') {
     notify(`${orderNumber(order)} guardada.`);
     return order;
   } catch (error) { notify(`No se pudo guardar: ${error.message || 'revisa la conexión y los datos.'}`); return null; }
+}
+function validateInspection() {
+  const missing = [];
+  const odometer = Number(String($('#odometer').value).replace(/[^\d]/g, ''));
+  if (!$('#odometer').value.trim() || !Number.isFinite(odometer) || odometer < 0) missing.push('kilometraje');
+  if (!$('.fuel-option.selected')) missing.push('nivel de combustible');
+  if (missing.length) { notify(`Completa la inspección: ${missing.join(' y ')}.`); return false; }
+  return true;
 }
 function renderSummary(order) {
   const summaries = [$('#view-reception .summary-list'), $('#view-inspection .summary-list')].filter(Boolean);
@@ -496,7 +504,7 @@ function renderDashboard() {
   const active = orders.filter((order) => !['Completa', 'Cancelada'].includes(order.status));
   const pending = orders.filter((order) => order.approval_status === 'pending' || order.status === 'Aprobación');
   const inspections = orders.filter((order) => order.status === 'Inspección');
-  const ready = orders.filter((order) => !['Borrador', 'Cancelada'].includes(order.status));
+  const ready = orders.filter((order) => ['Aprobación', 'En servicio', 'Completa'].includes(order.status));
   const values = [active.length, pending.length, inspections.length, ready.length];
   $$('.kpi-value', $('#view-home')).forEach((el, index) => { if (index < values.length) el.textContent = String(values[index]).padStart(2, '0'); });
   const feet = $$('.kpi-foot', $('#view-home'));
@@ -514,10 +522,22 @@ function renderDashboard() {
   const counts = $$('.flow-step .step-count', $('#view-home'));
   [orders.filter((o) => !['Cancelada'].includes(o.status)).length, inspections.length, ready.length, pending.length].forEach((value, index) => { if (counts[index]) counts[index].textContent = String(value).padStart(2, '0'); });
   const badge = $('#view-home .dashboard-grid .flow-head .badge');
-  if (badge) { badge.textContent = localMode ? 'Prueba local' : 'En vivo'; badge.className = `badge ${localMode ? 'violet' : 'green'}`; }
+  if (badge) { badge.textContent = publicDemoBuild ? 'Demo aislada' : localMode ? 'Local' : 'En vivo'; badge.className = `badge ${publicDemoBuild ? 'violet' : localMode ? 'amber' : 'green'}`; }
   const banner = $('#view-home .demo-banner div');
-  if (banner) banner.innerHTML = localMode ? '<strong>Modo local:</strong> existe una sola orden ficticia de prueba. Todo lo que captures aquí se guarda únicamente en este navegador.' : '<strong>Datos del taller:</strong> los registros se guardan en Supabase y están aislados por taller. La aprobación es un registro interno; no se envían mensajes.';
-  if ($('#resetDemoBtn')) $('#resetDemoBtn').hidden = !localMode;
+  if (banner) banner.innerHTML = publicDemoBuild
+    ? '<strong>Demostración:</strong> contiene un expediente inventado y separado de los datos operativos. Los cambios de esta demo se quedan en este navegador.'
+    : localMode
+      ? '<strong>Modo local sin costo de servidor:</strong> las órdenes y gastos empiezan vacíos y se guardan solo en este navegador. No se sincronizan con otros dispositivos; puedes exportar listas CSV. Las fotos permanecen en este navegador.'
+      : '<strong>Datos del taller:</strong> los registros se guardan en el espacio privado configurado. La aprobación es un registro interno; no se envían mensajes.';
+  if ($('#resetDemoBtn')) $('#resetDemoBtn').hidden = !publicDemoBuild;
+  const homeMeta = $('#view-home .dashboard-grid .card-meta');
+  if (homeMeta) homeMeta.textContent = 'Atajos a la siguiente acción · órdenes guardadas';
+  const homeFoot = $('#view-home .dashboard-grid .table-foot span:first-child');
+  if (homeFoot) homeFoot.textContent = orders.length ? 'Órdenes de tu espacio de trabajo.' : 'Todavía no hay órdenes registradas.';
+  const priorityCount = $('#view-home .dashboard-grid .table-foot .mono');
+  if (priorityCount) priorityCount.textContent = `${String(priorities.length).padStart(2, '0')} prioritarias`;
+  const quickApproval = $$('#view-home .quick-sub')[3];
+  if (quickApproval) quickApproval.textContent = `${pending.length} pendiente(s)`;
   const badgeCounts = $$('.nav-count');
   if (badgeCounts[0]) badgeCounts[0].textContent = String(active.length).padStart(2, '0');
   if (badgeCounts[1]) badgeCounts[1].textContent = String(inspections.length).padStart(2, '0');
@@ -536,7 +556,7 @@ function renderOrders() {
       <td class="primary-cell mono">${escapeHtml(orderNumber(order))}<span class="subcell">${escapeHtml(fmtDate(order.received_at))}</span></td>
       <td>${escapeHtml(order.customer?.name || '')}</td><td>${escapeHtml(orderTitle(order))}<span class="subcell">${escapeHtml(order.vehicle?.year || '—')} · ${escapeHtml(order.vehicle?.plate || '—')}</span></td>
       <td>${escapeHtml(order.reason || '—')}</td><td>${escapeHtml(order.technician || 'Por asignar')}</td>
-      <td><span class="badge ${statusClass(order.status)}">${escapeHtml(order.status)}</span></td>
+      <td><select class="status-select" data-order-status="${escapeHtml(order.id)}" aria-label="Estado de ${escapeHtml(orderNumber(order))}">${STATUSES.map((status) => `<option${status === order.status ? ' selected' : ''}>${escapeHtml(status)}</option>`).join('')}</select></td>
       <td><div class="table-action"><button class="order-click show-pdf" data-open-pdf="${escapeHtml(order.id)}">Vista PDF</button><button class="order-click" data-open-order="${escapeHtml(order.id)}" data-target-view="reception">Editar</button></div></td></tr>`).join('');
   }
   filterOrders();
@@ -544,6 +564,7 @@ function renderOrders() {
   if (approvalSelect) {
     const current = approvalOrderId;
     approvalSelect.innerHTML = orders.length ? orders.map((order) => `<option value="${escapeHtml(order.id)}">${escapeHtml(orderNumber(order))} · ${escapeHtml(order.customer?.name || '')} · ${escapeHtml(orderTitle(order))}</option>`).join('') : '<option value="">No hay órdenes</option>';
+    approvalSelect.disabled = orders.length === 0;
     approvalOrderId = orderById(current) ? current : (orders[0]?.id || null);
     if (approvalOrderId) approvalSelect.value = approvalOrderId;
     renderApprovalSummary();
@@ -560,9 +581,54 @@ function filterOrders() {
   });
   if ($('#resultCount')) $('#resultCount').textContent = `${String(count).padStart(2, '0')} visibles`;
 }
+async function changeOrderStatus(id, status) {
+  const order = orderById(id);
+  if (!order || !STATUSES.includes(status)) return;
+  if (status === 'Aprobación' && order.approval_status !== 'pending') {
+    notify('Registra primero la solicitud en la sección Aprobación del cliente.');
+    renderOrders();
+    return;
+  }
+  if (status === 'En servicio' && order.approval_status !== 'approved') {
+    notify('Registra la aprobación recibida antes de iniciar el servicio.');
+    renderOrders();
+    return;
+  }
+  if (status === 'Completa' && order.status !== 'En servicio') {
+    notify('Marca la orden En servicio antes de completarla.');
+    renderOrders();
+    return;
+  }
+  const updated = { ...order, status, updated_at: nowIso() };
+  try {
+    await backend.saveOrder(updated);
+    await backend.logEvent(updated, 'status_changed', { from: order.status, to: status });
+    renderAll();
+    notify(`${orderNumber(updated)} · estado actualizado a ${status}.`);
+  } catch (error) {
+    renderOrders();
+    notify(`No se pudo actualizar el estado: ${error.message || 'revisa la conexión.'}`);
+  }
+}
+
 function renderApprovalSummary() {
   const order = orderById(approvalOrderId);
-  if (!order) return;
+  if (!order) {
+    const eyebrow = $('#view-approval .eyebrow');
+    if (eyebrow) eyebrow.innerHTML = '<span class="dot"></span>Sin orden seleccionada';
+    const summary = $('#view-approval .summary-list');
+    if (summary) summary.innerHTML = '<div class="empty-state">Registra una recepción para habilitar el flujo de aprobación.</div>';
+    const status = $('#approvalPreviewStatus');
+    if (status) { status.textContent = 'Sin órdenes'; status.className = 'badge gray'; }
+    const state = $('#view-approval .approval-state');
+    if (state) {
+      state.querySelector('strong').textContent = 'No hay una orden para revisar';
+      state.querySelector('span:not(.big-icon)').textContent = 'Cuando exista una orden, aquí podrás registrar la solicitud y la respuesta recibida.';
+    }
+    if ($('#simulateApproval')) $('#simulateApproval').disabled = true;
+    return;
+  }
+  if ($('#simulateApproval')) $('#simulateApproval').disabled = false;
   const eyebrow = $('#view-approval .eyebrow');
   if (eyebrow) eyebrow.innerHTML = `<span class="dot"></span>${escapeHtml(orderNumber(order))} · Paso 4 de 4`;
   const summary = $('#view-approval .summary-list');
@@ -575,6 +641,9 @@ function renderApprovalSummary() {
     status.textContent = approvalLabel(order);
     status.className = `badge ${order.approval_status === 'approved' ? 'green' : order.approval_status === 'changes_requested' ? 'coral' : order.approval_status === 'pending' ? 'amber' : 'gray'}`;
   }
+  if ($('#signatureProvider')) $('#signatureProvider').value = order.signature_provider || 'Por definir con el cliente';
+  $('#approvalNote').value = order.approval_note || '';
+  $$('input[name="channel"]').forEach((input) => { input.checked = input.parentElement.textContent.trim() === order.approval_channel; });
   const state = $('#view-approval .approval-state');
   if (state) {
     const titles = { not_requested: 'Sin solicitud registrada', pending: 'Solicitud registrada en el taller', approved: 'Aprobación registrada internamente', changes_requested: 'Cambios registrados' };
@@ -741,6 +810,7 @@ function exportExpenses() {
 async function saveInspection() {
   const current = orderById(activeOrderId);
   if (!current) { notify('Primero crea o abre una recepción.'); openNewReception(); return; }
+  if (!validateInspection()) return;
   const order = readForm(current);
   order.status = current.status === 'Borrador' ? 'Inspección' : current.status;
   try {
@@ -749,6 +819,7 @@ async function saveInspection() {
   } catch (error) { notify(`No se pudo guardar la inspección: ${error.message}`); }
 }
 async function reviewOrder() {
+  if (!validateInspection()) return;
   let order = orderById(activeOrderId);
   if (!order) order = await saveReception('inspection');
   else {
@@ -806,6 +877,10 @@ function registerEvents() {
   $('#photoAddBtn')?.addEventListener('click', () => $('#photoInput').click());
   $('#photoInput')?.addEventListener('change', (event) => addPhotos(event.target.files));
   $$('.fuel-option').forEach((button) => button.addEventListener('click', () => { $$('.fuel-option').forEach((el) => el.classList.remove('selected')); button.classList.add('selected'); }));
+  $('#ordersTable')?.addEventListener('change', (event) => {
+    const statusSelect = event.target.closest('[data-order-status]');
+    if (statusSelect) changeOrderStatus(statusSelect.dataset.orderStatus, statusSelect.value);
+  });
   ['orderSearch', 'stateFilter', 'reasonFilter'].forEach((id) => $(`#${id}`)?.addEventListener('input', filterOrders));
   $('#approvalOrder')?.addEventListener('change', () => { approvalOrderId = $('#approvalOrder').value; renderApprovalSummary(); });
   $('#toApprovalBtn')?.addEventListener('click', () => { approvalOrderId = printOrderId || activeOrderId; renderApprovalSummary(); showView('approval'); });
@@ -826,9 +901,10 @@ function registerEvents() {
   $('#exportOrdersBtn')?.addEventListener('click', exportOrders);
   $('#exportExpensesBtn')?.addEventListener('click', exportExpenses);
   $('#resetDemoBtn')?.addEventListener('click', () => {
-    if (!localMode) { notify('Restablecer la prueba solo está disponible en modo local.'); return; }
-    if (!window.confirm('Esto borrará las órdenes y gastos guardados en este navegador y los sustituirá por una sola orden ficticia de prueba. ¿Continuar?')) return;
-    writeLocal(LOCAL_ORDERS_KEY, [demoOrder()]); writeLocal(LOCAL_EXPENSES_KEY, []); orders = [demoOrder()]; expenses = []; activeOrderId = null; renderAll(); notify('Prueba restaurada.');
+    if (!publicDemoBuild) { notify('El restablecimiento solo está disponible en la demo ficticia.'); return; }
+    if (!window.confirm('Esto restablecerá solo los datos aislados de esta demo en este navegador. ¿Continuar?')) return;
+    const sample = demoOrder();
+    writeLocal(LOCAL_ORDERS_KEY, [sample]); writeLocal(LOCAL_EXPENSES_KEY, []); orders = [sample]; expenses = []; activeOrderId = null; approvalOrderId = sample.id; renderAll(); notify('Demo ficticia restablecida.');
   });
   document.addEventListener('click', async (event) => {
     const add = event.target.closest('[data-photo-add]');
@@ -862,13 +938,17 @@ function registerEvents() {
 function updateStaticText() {
   $('#topDate').textContent = new Intl.DateTimeFormat('es-MX', { dateStyle: 'medium' }).format(new Date());
   const footer = $('.footer-note');
-  if (footer) footer.textContent = localMode ? 'MODO LOCAL · PRUEBA FICTICIA · DATOS GUARDADOS EN ESTE NAVEGADOR' : 'TALLER CONTROL · EXPEDIENTE PRIVADO DEL TALLER · SUPABASE';
+  if (footer) footer.textContent = publicDemoBuild ? 'DEMO AISLADA · DATOS FICTICIOS · SIN SERVICIOS EXTERNOS' : localMode ? 'MODO LOCAL · DATOS EN ESTE NAVEGADOR · SIN COSTO DE SERVIDOR' : 'TALLER CONTROL · EXPEDIENTE PRIVADO DEL TALLER';
   $('#view-orders .page-sub').textContent = 'Busca, filtra y abre expedientes; imprime o guarda la orden como PDF.';
   const demoNote = $('#view-orders .demo-banner div');
   if (demoNote) demoNote.innerHTML = '<strong>Orden imprimible:</strong> genera una vista del expediente actual. La impresión contiene espacios de firma manuscrita; no es una firma electrónica.';
   const approvalIntro = $('#view-approval .page-sub');
   if (approvalIntro) approvalIntro.textContent = 'Registra solicitud y respuesta recibida; el sistema no envía mensajes ni firma por el cliente.';
   $('#simulateApproval').textContent = 'Registrar solicitud interna';
+  const ordersFoot = $('#view-orders .table-foot span:first-child');
+  if (ordersFoot) ordersFoot.textContent = localMode ? 'Datos locales de este navegador.' : 'Órdenes del espacio de trabajo.';
+  const sideNote = $('.side-note p');
+  if (sideNote) sideNote.textContent = localMode ? 'Recepción, inspección, órdenes, aprobación interna y gastos; guardados en este navegador.' : 'Recepción, inspección, órdenes, aprobación interna y gastos del taller.';
 }
 
 async function start() {
@@ -877,7 +957,7 @@ async function start() {
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('/service-worker.js').catch((error) => console.warn('PWA no pudo registrarse:', error.message));
   try {
     const ready = await backend.boot();
-    if (ready) { renderAll(); if (orders.length) fillForm(orders[0]); showView('home'); }
+    if (ready) { renderAll(); if (orders.length) fillForm(orders[0]); else clearForm(); showView('home'); }
   } catch (error) {
     console.error(error);
     notify(`No se pudo abrir el taller: ${error.message}`);
