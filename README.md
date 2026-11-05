@@ -18,7 +18,7 @@ npm run manager:init
 npm run local
 ```
 
-`npm install` instala las dependencias locales. Antes del primer arranque, `npm run manager:init` crea una sola vez la cuenta del encargado inicial: pide nombre y correo, y solicita una contraseña dos veces sin mostrarla mientras se escribe. Usa una contraseña única de al menos 12 caracteres. No crea órdenes ni gastos. Si ya hay una cuenta de encargado, el comando no vuelve a funcionar.
+`npm install` instala las dependencias locales. Antes del primer arranque, `npm run manager:init` crea una sola vez la cuenta del encargado inicial: pide correo, nombre y una contraseña dos veces sin mostrarla mientras se escribe. Usa una contraseña única de al menos 12 caracteres. La base de datos se inicializa después de capturar las respuestas para que el aviso informativo de SQLite de Node.js no aparezca junto al campo del correo: ese aviso no es el correo ni debes escribirlo. No crea órdenes ni gastos. Si ya hay una cuenta de encargado, el comando no vuelve a funcionar.
 
 `npm run local` compila la interfaz y arranca el servidor SQLite en el puerto 3000. Por defecto abre `http://localhost:3000` en la computadora del servidor y muestra las direcciones LAN, por ejemplo `http://192.168.1.20:3000`, para los demás dispositivos autorizados. El encargado inicia sesión y administra las cuentas desde su perfil en la app. Si no se abre el navegador, visita una de las direcciones que muestra la terminal. Para no abrirlo automáticamente, define `TALLER_NO_OPEN_BROWSER=1` antes de iniciar.
 

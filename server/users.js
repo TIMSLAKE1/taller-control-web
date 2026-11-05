@@ -1,5 +1,4 @@
 import { createInterface } from 'node:readline';
-import { createInitialManager, closeDatabase } from './db.js';
 
 function option(name) {
   const index = process.argv.indexOf(`--${name}`);
@@ -50,14 +49,17 @@ async function main() {
   const password = await askSecret('Contraseña nueva (12 caracteres mínimo): ');
   const confirmation = await askSecret('Repite la contraseña: ');
   if (password !== confirmation) throw new Error('Las contraseñas no coinciden.');
-  const user = createInitialManager({ email, displayName, password });
-  console.log(`Encargado inicial creado para ${user.display_name} (${user.email}).`);
-  console.log('Después del primer acceso, agrega y desactiva técnicos desde la administración de usuarios en la app.');
+  const { createInitialManager, closeDatabase } = await import('./db.js');
+  try {
+    const user = createInitialManager({ email, displayName, password });
+    console.log(`Encargado inicial creado para ${user.display_name} (${user.email}).`);
+    console.log('Después del primer acceso, agrega y desactiva técnicos desde la administración de usuarios en la app.');
+  } finally {
+    closeDatabase();
+  }
 }
 
 main().catch((error) => {
   console.error(`No se pudo crear el encargado inicial: ${error.message}`);
   process.exitCode = 1;
-}).finally(() => {
-  try { closeDatabase(); } catch {}
 });
