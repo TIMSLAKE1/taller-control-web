@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
 import { BlockList, isIP } from 'node:net';
 import { readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -372,6 +373,19 @@ const server = createServer(async (req, res) => {
   serveStatic(req, res, pathname);
 });
 
+function openLocalBrowser(url) {
+  if (process.env.TALLER_NO_OPEN_BROWSER === '1') return;
+  const command = process.platform === 'win32' ? 'rundll32.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+  const args = process.platform === 'win32' ? ['url.dll,FileProtocolHandler', url] : [url];
+  try {
+    const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', () => console.warn('No se pudo abrir el navegador automáticamente; abre la dirección local mostrada arriba.'));
+    child.unref();
+  } catch {
+    console.warn('No se pudo abrir el navegador automáticamente; abre la dirección local mostrada arriba.');
+  }
+}
+
 server.on('error', (error) => {
   console.error(`No se pudo iniciar el servidor: ${error.message}`);
   process.exitCode = 1;
@@ -386,6 +400,10 @@ server.listen(port, host, () => {
   }
   console.log(`Base de datos local: ${path.join(dataDir, 'taller-control.sqlite')}`);
   console.log('Solo las cuentas provisionadas de técnicos mecánicos pueden consultar los datos.');
+  if (process.env.TALLER_NO_OPEN_BROWSER !== '1') {
+    console.log('Abriendo la pantalla de acceso en este equipo…');
+    openLocalBrowser(`http://localhost:${port}`);
+  }
 });
 
 function shutdown() {

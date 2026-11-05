@@ -1,4 +1,4 @@
-const CACHE = 'taller-control-shell-v2';
+const CACHE = 'taller-control-shell-v3';
 const APP_SHELL = ['/','/manifest.webmanifest','/icons/icon.svg'];
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
@@ -11,6 +11,13 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return;
+  if (event.request.mode === 'navigate' || url.pathname === '/') {
+    event.respondWith(fetch(event.request).then((response) => {
+      if (response && response.ok) caches.open(CACHE).then((cache) => cache.put(event.request, response.clone()));
+      return response;
+    }).catch(() => caches.match(event.request)));
+    return;
+  }
   event.respondWith(caches.match(event.request).then((cached) => {
     const network = fetch(event.request).then((response) => {
       if (response && response.ok) {

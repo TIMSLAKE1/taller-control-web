@@ -17,7 +17,9 @@ npm install
 npm run local
 ```
 
-`npm install` instala las dependencias locales del proyecto. `npm run local` compila la app y arranca el servidor SQLite en el puerto 3000. La terminal muestra las direcciones disponibles: abre la indicada desde cada dispositivo autorizado, por ejemplo `http://192.168.1.20:3000`. El servidor permanece activo hasta cerrar la terminal o detener el proceso; no se configura como servicio permanente ni se publica en Internet.
+`npm install` instala las dependencias locales del proyecto. `npm run local` compila la app, arranca el servidor SQLite en el puerto 3000 y abre automáticamente `http://localhost:3000` en el navegador de esa computadora. Aparece la pantalla de inicio de sesión; cada técnico entra con su cuenta autorizada y después puede usar la web app. Si ya hay una sesión vigente, se reanuda sin volver a pedir la contraseña; las sesiones vencen a las 12 horas y también se pueden cerrar desde la app. La terminal muestra además las direcciones para que los demás dispositivos del taller entren, por ejemplo `http://192.168.1.20:3000`.
+
+Si el navegador no se abre automáticamente, visita `http://localhost:3000` en la computadora del servidor o la dirección de red mostrada en la terminal desde otro dispositivo autorizado. En un equipo sin entorno gráfico, la apertura automática se puede desactivar con `TALLER_NO_OPEN_BROWSER=1`; el servidor seguirá mostrando las direcciones disponibles.
 
 Si el firewall de la computadora lo solicita, permite el puerto TCP 3000 únicamente en la red privada del taller. No configures reenvío del puerto en el router ni exposición pública. Para dejar de compartir la app, detén el proceso con `Ctrl+C`.
 

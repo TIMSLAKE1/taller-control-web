@@ -1024,7 +1024,14 @@ function updateStaticText() {
 }
 
 async function start() {
-  if (serverMode) document.body.classList.add('server-locked');
+  if (serverMode) {
+    document.body.classList.add('server-locked');
+    showAuth('signin');
+    const message = $('#authMessage');
+    message.className = 'auth-success';
+    message.textContent = 'Conectando con el servidor local…';
+    $('#localAuthForm').querySelectorAll('input, button').forEach((control) => { control.disabled = true; });
+  }
   document.documentElement.classList.remove('app-pending');
   addExtraUi(); setupTeamUi(); updateStaticText(); registerEvents();
   $('#stateFilter').innerHTML = '<option value="">Todos los estados</option>' + STATUSES.map((status) => `<option>${escapeHtml(status)}</option>`).join('');
