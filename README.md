@@ -1,65 +1,61 @@
 # Taller Control
 
-Aplicación web adaptable al celular para gestionar recepción de vehículos, inspección, órdenes imprimibles, autorizaciones internas y gastos. Conserva las seis secciones operativas: Panel general, Recepción, Inspección, Órdenes de servicio, Aprobación del cliente y Reportes y gastos. Incluye instalación como PWA.
+Aplicación para gestionar las seis secciones operativas: Panel general, Recepción, Inspección, Órdenes de servicio, Aprobación del cliente y Reportes y gastos. El modo de trabajo comparte los registros de todo el taller mediante un servidor dentro de la red local y SQLite; no usa Supabase, hosting permanente ni servicios de pago.
 
-## Ejecutar la aplicación operativa
+## Requisitos
 
-Requiere Node.js 20 o superior y npm.
+- Node.js 22.13 o superior (se recomienda Node.js 24 LTS).
+- Una computadora del taller que funcionará como servidor mientras se use la app.
+- Los celulares y computadoras de los mecánicos conectados a la misma red privada del taller.
+
+## Instalar y arrancar el taller
+
+En la computadora que alojará la base de datos, abre una terminal en la carpeta del proyecto y ejecuta:
 
 ```bash
 npm install
-npm run dev
+npm run local
 ```
 
-Sin credenciales Supabase, la app trabaja en modo local y comienza sin órdenes ni gastos. Recepciones, inspecciones, estados, gastos y fotos se guardan en el navegador de este dispositivo; no hay sincronización entre dispositivos ni servidor. El modo local no requiere un servicio de pago. Las órdenes y gastos se pueden exportar desde sus secciones como CSV; las fotos permanecen en el navegador.
+`npm install` instala las dependencias locales del proyecto. `npm run local` compila la app y arranca el servidor SQLite en el puerto 3000. La terminal muestra las direcciones disponibles: abre la indicada desde cada dispositivo autorizado, por ejemplo `http://192.168.1.20:3000`. El servidor permanece activo hasta cerrar la terminal o detener el proceso; no se configura como servicio permanente ni se publica en Internet.
 
-Para generar los archivos de producción:
+Si el firewall de la computadora lo solicita, permite el puerto TCP 3000 únicamente en la red privada del taller. No configures reenvío del puerto en el router ni exposición pública. Para dejar de compartir la app, detén el proceso con `Ctrl+C`.
+
+## Dar acceso a técnicos mecánicos
+
+No existe registro desde la página. El responsable que tenga acceso a la terminal de la computadora del servidor crea una cuenta por técnico:
 
 ```bash
-npm run build
-npm run preview
+npm run user:add -- --email mecanico@taller.mx --name "Nombre del técnico"
 ```
 
-## Demo pública sin backend
+El comando solicita la contraseña dos veces y no la muestra mientras se escribe. Debe tener al menos 12 caracteres. Repite el comando para cada mecánico autorizado. Todas las cuentas tienen el rol fijo **Técnico mecánico**; la interfaz no permite crear otros roles ni cuentas. Un usuario sin cuenta no puede consultar órdenes, gastos ni fotografías.
 
-Para generar la versión destinada a una publicación pública ficticia, ejecuta:
+Para retirar el acceso y cerrar las sesiones vigentes de un técnico:
 
 ```bash
-npm run build:demo
+npm run user:disable -- --email mecanico@taller.mx
 ```
 
-Este modo fuerza el almacenamiento en el navegador aunque existan variables Supabase en el entorno y evita inicializar el cliente remoto. Empieza con un solo registro ficticio (Diana Ejemplo, Volkswagen Jetta, TEST-001), separado de los datos operativos. Publica únicamente el contenido de `dist/`; no agregues funciones de servidor ni credenciales. Cada visitante tendrá su propio registro ficticio y los cambios quedarán en su navegador.
+## Datos y separación de la demo
 
-En un proveedor como Cloudflare Pages, mantén el proyecto en el plan gratuito y publica solo archivos estáticos: Cloudflare indica que las solicitudes a recursos estáticos no tienen costo ni límite de uso; Pages Functions, en cambio, cuentan como solicitudes de Workers. El plan gratuito limita los builds a 500 por mes. Sus alertas de presupuesto son informativas, no pausan ni limitan el gasto, así que no habilites Workers de pago, Functions, KV, R2 ni otros productos facturables para esta demo. No hay un proveedor de hosting vinculado a este repositorio todavía, por lo que la alerta de cuenta no se puede configurar desde el proyecto.
+El servidor guarda la base de datos en `data/taller-control.sqlite` y las fotografías en `data/evidence/`. La carpeta `data/` está excluida de Git. El almacenamiento empieza vacío y es compartido por los usuarios autorizados. No importa automáticamente los datos antiguos que quizá existan en el almacenamiento local de un navegador. Los registros inventados de la demo se mantienen separados y no se copian a la base real.
 
-## Funciones implementadas
+La demo ficticia se compila por separado con `npm run build:demo`; esa compilación es para mostrar el flujo con datos inventados y no debe usarse para manejar expedientes reales. Para preparar una prueba sin órdenes precargadas, `npm run build:test` crea almacenamiento de navegador aislado; no sustituye el servidor SQLite compartido.
 
-- Alta, edición y borradores locales de recepción, cliente, vehículo, motivo, falla y responsable.
-- Inspección de kilometraje, combustible, condición física, fluidos, accesorios, documentos, objetos declarados y fotos de evidencia.
-- Búsqueda, filtros por estado/motivo, avance de estados con validaciones, apertura de expedientes y exportación CSV.
-- Hoja de recepción imprimible o guardable como PDF.
-- Registro interno de solicitud, aprobación o cambios; no envía mensajes ni afirma que exista firma electrónica.
-- Reporte de presupuesto/plan de cinco semanas del prototipo y captura separada de gastos reales del taller.
-- Modo local persistente y sin costo de servidor. Supabase sigue siendo una integración opcional no configurada; no la actives si no puedes garantizar un costo de $0.
-- PWA instalable; el modo local mantiene sus datos en este navegador.
+## Respaldo y límites de red
 
-## Integración cloud opcional (no activada)
+No hay respaldo automático. Para respaldar los registros, detén el servidor con `Ctrl+C` y copia **toda** la carpeta `data/` a un medio seguro; incluye tanto el archivo SQLite como `evidence/`. No copies la base mientras el servidor sigue escribiendo. La recuperación requiere volver a colocar la carpeta completa en la computadora del servidor y arrancarlo de nuevo.
 
-No hay un proyecto Supabase conectado y la app local no lo necesita. Esta integración no se activó en este trabajo. Configúrala solo si puedes verificar que el plan y el uso tendrán un costo de $0, sin habilitar ni aceptar cargos; si no se puede confirmar, continúa en modo local y no la conectes. Para enlazarla en el futuro, aplica `supabase/migrations/20261104180000_initial_schema.sql`. El proyecto incorpora Auth, talleres y membresías, clientes, vehículos, órdenes, gastos, eventos y un bucket privado para evidencia; las políticas RLS aíslan los datos por taller.
+El servidor local usa HTTP, así que la conexión no cifra los datos entre dispositivos. Además de exigir una cuenta autorizada para consultar o cambiar registros, rechaza conexiones que no provengan de localhost o de rangos de red privada/local. Úsalo solo en una red confiable del taller; evita Wi‑Fi público o compartido y no configures reenvío del puerto hacia Internet. Antes de usar datos reales, valida las copias de respaldo, quién tiene acceso físico a la computadora y las reglas de privacidad y conservación de expedientes.
 
-Después copia la URL del proyecto y su clave **publishable/anon** a `.env.local` (nunca uses una clave `service_role` en el navegador):
+## Funciones conservadas
 
-```env
-VITE_SUPABASE_URL=https://TU-PROJECT-REF.supabase.co
-VITE_SUPABASE_ANON_KEY=sb_publishable_TU_CLAVE
-```
+- Recepción, edición y borradores de órdenes.
+- Inspección de kilometraje, combustible, condición, fluidos, accesorios, documentos, objetos declarados y fotos.
+- Búsqueda, filtros, cambios de estado, vista imprimible/PDF y exportación CSV.
+- Registro interno de solicitud y respuesta de aprobación; no envía mensajes ni crea una firma electrónica.
+- Reporte de planeación y captura separada de gastos reales.
+- PWA instalable; el service worker solo almacena recursos públicos de la interfaz y nunca guarda en caché las respuestas de la API o las fotos privadas.
 
-Reinicia Vite después de modificar variables. Inicia sesión/crea una cuenta y registra el nombre del taller. Si la primera cuenta requiere confirmar correo, completa la confirmación antes de iniciar sesión. Los datos ficticios de modo local no se copian a Supabase.
-
-## Notas de operación y seguridad
-
-- La aprobación se registra como constancia interna. No se conecta con WhatsApp, correo ni un proveedor de firma; confirma por separado los requisitos legales y el mecanismo adecuado antes de usarla como consentimiento.
-- Los archivos de evidencia quedan en el bucket privado al usar Supabase. En modo local se conservan en IndexedDB del mismo navegador.
-- No se almacenan secretos en el repositorio. `.env.local` está excluido por `.gitignore`.
-- Para publicar solo la demo ficticia, usa `npm run build:demo`; el build normal puede conectarse a Supabase si se configuran credenciales.
-- El presupuesto de $43,395 MXN y el cronograma de cinco semanas se conservan como supuestos de planeación del prototipo, no como gastos reales ni una cotización aceptada.
+El presupuesto de $43,395 MXN y el calendario de cinco semanas que aparecen en Reportes son supuestos de planeación del prototipo, no gastos reales ni una cotización aceptada.

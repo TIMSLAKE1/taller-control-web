@@ -15,23 +15,28 @@ const fmtDate = (value, options = { dateStyle: 'medium', timeStyle: 'short' }) =
   return Number.isNaN(date.valueOf()) ? String(value) : new Intl.DateTimeFormat('es-MX', options).format(date);
 };
 const publicDemoBuild = import.meta.env.MODE === 'public-demo';
-const localMode = publicDemoBuild || !import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_ANON_KEY;
-const STORAGE_PREFIX = publicDemoBuild ? 'taller-control.demo' : 'taller-control';
+const cleanTestBuild = import.meta.env.MODE === 'clean-test';
+const localMode = publicDemoBuild || cleanTestBuild;
+const serverMode = !localMode;
+const STORAGE_PREFIX = publicDemoBuild ? 'taller-control.demo' : cleanTestBuild ? 'taller-control.clean-test' : 'taller-control';
 const LOCAL_ORDERS_KEY = `${STORAGE_PREFIX}.orders.v1`;
 const LOCAL_EXPENSES_KEY = `${STORAGE_PREFIX}.expenses.v1`;
+const LOCAL_TEAM_KEY = `${STORAGE_PREFIX}.team.v1`;
+const LOCAL_TEAM_NAME_KEY = `${STORAGE_PREFIX}.team-name.v1`;
 const STATUSES = ['Borrador', 'Inspección', 'Aprobación', 'En servicio', 'Completa', 'Cancelada'];
 const REASONS = ['Mantenimiento', 'Reparación', 'Diagnóstico'];
 const FLUID_NAMES = ['Aceite de motor', 'Refrigerante', 'Líquido de frenos', 'Dirección hidráulica', 'Limpiaparabrisas', 'Transmisión'];
 const CATEGORIES = ['Refacciones', 'Insumos', 'Servicios externos', 'Herramientas', 'Operación', 'Otro'];
-let client = null;
 let user = null;
-let workshop = null;
 let orders = [];
 let expenses = [];
+let teamMembers = [];
+let localTeamName = 'Equipo de taller';
 let activeOrderId = null;
 let approvalOrderId = null;
 let printOrderId = null;
 let toastTimer = null;
+let refreshTimer = null;
 let installPrompt = null;
 let photoDbPromise = null;
 let photoUrls = [];
@@ -98,12 +103,57 @@ async function deleteLocalPhoto(key) {
   });
 }
 
+function lockExpiredSession() {
+  if (!serverMode || !user) return;
+  user = null;
+  clearInterval(refreshTimer);
+  showAuth('signin');
+  const message = $('#authMessage');
+  if (message) message.textContent = 'La sesión venció o fue revocada; vuelve a iniciar sesión.';
+}
+
+async function serverRequest(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  let body = options.body;
+  if (body !== undefined && body !== null && !(body instanceof Blob) && typeof body !== 'string') {
+    headers.set('Content-Type', 'application/json');
+    body = JSON.stringify(body);
+  } else if (body instanceof Blob) {
+    headers.set('Content-Type', body.type || 'application/octet-stream');
+    if (body.name) headers.set('X-File-Name', body.name);
+  }
+  const response = await fetch(url, { ...options, headers, body, credentials: 'same-origin', cache: 'no-store' });
+  const result = response.status === 204 ? null : await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(result?.error || `Error del servidor (${response.status}).`);
+    error.status = response.status;
+    if (response.status === 401) lockExpiredSession();
+    throw error;
+  }
+  return result;
+}
+
+function startServerRefresh() {
+  if (!serverMode || !user) return;
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(async () => {
+    if (document.hidden || !user) return;
+    try {
+      const data = await serverRequest('/api/data');
+      orders = data.orders || []; expenses = data.expenses || [];
+      setConnection('Servidor SQLite', 'server'); renderAll();
+    } catch (error) {
+      if (error.status !== 401) setConnection('Sin conexión', 'offline');
+    }
+  }, 30000);
+}
+
 function setConnection(label, type) {
   const el = $('#connectionStatus');
   if (!el) return;
   el.textContent = label;
   el.className = `badge gray connection-indicator ${type}`;
-  el.title = type === 'local' ? 'Los cambios se guardan en este navegador.' : type === 'cloud' ? 'Sesión conectada a Supabase.' : 'No hay conexión disponible.';
+  el.title = type === 'local' ? 'Los cambios se guardan en este navegador.' : type === 'server' ? 'Sesión autenticada; los cambios se guardan en la base SQLite del servidor local.' : 'No hay conexión disponible.';
 }
 function notify(message) {
   const toast = $('#toast');
@@ -114,12 +164,18 @@ function notify(message) {
   toastTimer = setTimeout(() => toast.classList.remove('show'), 3600);
 }
 function setProfile() {
-  const name = workshop?.name || (user?.email ? user.email.split('@')[0] : 'Equipo de taller');
-  const role = user ? (workshop ? 'Sesión Supabase' : 'Configura tu taller') : (publicDemoBuild ? 'Demo ficticia' : localMode ? 'Modo local · este dispositivo' : 'Sin iniciar sesión');
+  const name = serverMode && user ? (user.display_name || user.email) : localMode && !publicDemoBuild ? localTeamName : 'Equipo de taller';
+  const role = serverMode ? (user ? 'Técnico mecánico · SQLite local' : 'Sesión cerrada') : publicDemoBuild ? 'Demo ficticia' : 'Prueba limpia · este dispositivo';
   const nameEl = $('.profile-name');
   const roleEl = $('.profile-role');
   if (nameEl) nameEl.textContent = name;
   if (roleEl) roleEl.textContent = role;
+  const teamButton = $('#openTeamBtn');
+  if (teamButton) {
+    teamButton.disabled = !localMode || publicDemoBuild;
+    teamButton.title = teamButton.disabled ? 'La administración local de equipo no está disponible en este modo.' : 'Administrar equipo local';
+  }
+  renderTeamUi();
   const bottom = $('.side-bottom');
   if (bottom && user && !$('#signOutBtn')) {
     const tools = document.createElement('div');
@@ -127,7 +183,7 @@ function setProfile() {
     tools.innerHTML = '<button type="button" id="signOutBtn">Cerrar sesión</button>';
     bottom.append(tools);
     $('#signOutBtn').addEventListener('click', async () => {
-      if (client) await client.auth.signOut();
+      if (serverMode) await serverRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
       window.location.reload();
     });
   }
@@ -159,60 +215,33 @@ const backend = {
       if (!publicDemoBuild) orders = orders.filter((order) => !order.is_demo && !String(order.id || '').startsWith('demo-'));
       writeLocal(LOCAL_ORDERS_KEY, orders);
       expenses = readLocal(LOCAL_EXPENSES_KEY, []);
+      teamMembers = readLocal(LOCAL_TEAM_KEY, []);
+      if (!Array.isArray(teamMembers)) teamMembers = [];
+      teamMembers = teamMembers.filter((member) => member && typeof member.name === 'string' && member.name.trim()).map((member) => ({ id: member.id || uuid(), name: member.name.trim(), role: String(member.role || '').trim() }));
+      localTeamName = readLocal(LOCAL_TEAM_NAME_KEY, 'Equipo de taller');
+      if (typeof localTeamName !== 'string' || !localTeamName.trim()) localTeamName = 'Equipo de taller';
+      localTeamName = localTeamName.trim();
       setConnection(navigator.onLine ? 'Modo local' : 'Sin conexión', navigator.onLine ? 'local' : 'offline');
       setProfile();
       return true;
     }
-    const { createClient } = await import('@supabase/supabase-js');
-    client = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY, {
-      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
-    });
-    const { data: { session }, error } = await client.auth.getSession();
-    if (error) throw error;
-    user = session?.user || null;
-    if (!user) {
+    const session = await serverRequest('/api/session');
+    user = session.user;
+    if (!session.authenticated) {
       showAuth('signin');
       setConnection('Inicia sesión', 'offline');
       return false;
     }
-    return this.loadWorkspace();
-  },
-  async loadWorkspace() {
-    const { data, error } = await client.from('workshop_members')
-      .select('workshop_id, role, workshops(id, name)')
-      .eq('user_id', user.id).order('created_at', { ascending: true }).limit(1);
-    if (error) throw error;
-    const membership = data?.[0];
-    if (!membership?.workshops) {
-      showAuth('workspace');
-      setConnection('Configura el taller', 'offline');
-      setProfile();
-      return false;
-    }
-    workshop = membership.workshops;
     await this.loadData();
-    setConnection('Conectado', 'cloud');
+    setConnection('Servidor SQLite', 'server');
     setProfile();
     hideAuth();
     return true;
   },
   async loadData() {
-    const { data, error } = await client.from('service_orders')
-      .select('*, customers(*), vehicles(*)')
-      .eq('workshop_id', workshop.id).order('received_at', { ascending: false }).limit(500);
-    if (error) throw error;
-    orders = (data || []).map((row) => ({
-      id: row.id, order_number: row.order_number, is_demo: false,
-      customer: { name: row.customers?.full_name || '', phone: row.customers?.phone || '', city: row.customers?.city || '', address: row.customers?.address || '', notes: row.customers?.notes || '' },
-      vehicle: { plate: row.vehicles?.plate || '', vin: row.vehicles?.vin || '', make: row.vehicles?.make || '', model: row.vehicles?.model || '', year: row.vehicles?.year || '', color: row.vehicles?.color || '', notes: row.vehicles?.notes || '' },
-      _customer_id: row.customer_id, _vehicle_id: row.vehicle_id,
-      received_at: row.received_at, reason: row.reason, technician: row.technician || '', failure_summary: row.failure_summary || '', reported_issue: row.reported_issue || '',
-      status: row.status, odometer: row.odometer, fuel_level: row.fuel_level, physical_notes: row.physical_notes || '', inspection: row.inspection || {}, inventory: row.inventory || {}, evidence: row.evidence || [],
-      work_scope: row.work_scope || '', estimate_total: Number(row.estimate_total || 0), approval_status: row.approval_status || 'not_requested', approval_channel: row.approval_channel || '', signature_provider: row.signature_provider || '', approval_note: row.approval_note || '', approval_recorded_at: row.approval_recorded_at, created_at: row.created_at, updated_at: row.updated_at
-    }));
-    const expensesResult = await client.from('shop_expenses').select('*').eq('workshop_id', workshop.id).order('expense_date', { ascending: false }).limit(1000);
-    if (expensesResult.error) throw expensesResult.error;
-    expenses = expensesResult.data || [];
+    const data = await serverRequest('/api/data');
+    orders = data.orders || [];
+    expenses = data.expenses || [];
   },
   async saveOrder(order) {
     order.updated_at = nowIso();
@@ -222,32 +251,8 @@ const backend = {
       writeLocal(LOCAL_ORDERS_KEY, orders);
       return order;
     }
-    const customerId = order._customer_id || uuid();
-    const vehicleId = order._vehicle_id || uuid();
-    const rowId = order.id && !String(order.id).startsWith('demo-') ? order.id : uuid();
-    const { error: customerError } = await client.from('customers').upsert({
-      id: customerId, workshop_id: workshop.id, full_name: order.customer.name, phone: order.customer.phone,
-      city: order.customer.city || null, address: order.customer.address || null, notes: order.customer.notes || null
-    });
-    if (customerError) throw customerError;
-    const { error: vehicleError } = await client.from('vehicles').upsert({
-      id: vehicleId, workshop_id: workshop.id, customer_id: customerId, plate: order.vehicle.plate.toUpperCase(),
-      vin: order.vehicle.vin || null, make: order.vehicle.make, model: order.vehicle.model, year: Number(order.vehicle.year) || null,
-      color: order.vehicle.color || null, notes: order.vehicle.notes || null
-    });
-    if (vehicleError) throw vehicleError;
-    const payload = {
-      id: rowId, workshop_id: workshop.id, order_number: order.order_number, customer_id: customerId, vehicle_id: vehicleId,
-      received_at: order.received_at, reason: order.reason, technician: order.technician || null, failure_summary: order.failure_summary || null,
-      reported_issue: order.reported_issue || null, status: order.status, odometer: Number(order.odometer) || null, fuel_level: order.fuel_level || null,
-      physical_notes: order.physical_notes || null, inspection: order.inspection || {}, inventory: order.inventory || {}, evidence: order.evidence || [],
-      work_scope: order.work_scope || null, estimate_total: Number(order.estimate_total || 0), approval_status: order.approval_status || 'not_requested',
-      approval_channel: order.approval_channel || null, signature_provider: order.signature_provider || null, approval_note: order.approval_note || null,
-      approval_recorded_at: order.approval_recorded_at || null, created_by: user.id
-    };
-    const { data, error } = await client.from('service_orders').upsert(payload).select().single();
-    if (error) throw error;
-    order.id = data.id; order._customer_id = customerId; order._vehicle_id = vehicleId; order.is_demo = false;
+    const result = await serverRequest(`/api/orders/${encodeURIComponent(order.id)}`, { method: 'PUT', body: order });
+    Object.assign(order, result.order);
     const index = orders.findIndex((item) => item.id === order.id);
     if (index >= 0) orders[index] = order; else orders.unshift(order);
     return order;
@@ -256,101 +261,72 @@ const backend = {
     if (localMode) {
       expenses.unshift(expense); writeLocal(LOCAL_EXPENSES_KEY, expenses); return expense;
     }
-    const { data, error } = await client.from('shop_expenses').insert({
-      workshop_id: workshop.id, expense_date: expense.expense_date, category: expense.category,
-      description: expense.description, amount: Number(expense.amount), service_order_id: expense.service_order_id || null, created_by: user.id
-    }).select().single();
-    if (error) throw error;
-    expenses.unshift(data); return data;
+    const result = await serverRequest('/api/expenses', { method: 'POST', body: expense });
+    expenses.unshift(result.expense); return result.expense;
   },
   async deleteExpense(id) {
     if (localMode) { expenses = expenses.filter((expense) => expense.id !== id); writeLocal(LOCAL_EXPENSES_KEY, expenses); return; }
-    const { error } = await client.from('shop_expenses').delete().eq('id', id).eq('workshop_id', workshop.id);
-    if (error) throw error;
+    await serverRequest(`/api/expenses/${encodeURIComponent(id)}`, { method: 'DELETE' });
     expenses = expenses.filter((expense) => expense.id !== id);
   },
   async logEvent(order, eventType, details = {}) {
-    if (localMode || !client || !workshop) return;
-    const { error } = await client.from('service_order_events').insert({
-      workshop_id: workshop.id, service_order_id: order.id, event_type: eventType, details, actor_id: user.id
-    });
-    if (error) console.warn('No se pudo guardar el evento de auditoría', error.message);
+    if (localMode) return;
+    try { await serverRequest('/api/events', { method: 'POST', body: { order_id: order.id, event_type: eventType, details } }); }
+    catch (error) { console.warn('No se pudo guardar el evento de auditoría', error.message); }
   },
   async uploadPhoto(order, file) {
     if (file.size > 10 * 1024 * 1024) throw new Error('Cada foto debe pesar 10 MB o menos.');
     const fileId = uuid();
-    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-90) || 'evidencia.jpg';
     if (localMode) {
       const localKey = `${order.id}:${fileId}`;
       await putLocalPhoto(localKey, file);
       order.evidence = [...(order.evidence || []), { name: file.name, localKey, created_at: nowIso(), size: file.size, type: file.type }];
     } else {
-      const path = `${workshop.id}/${order.id}/${fileId}-${safeName}`;
-      const { error } = await client.storage.from('workshop-evidence').upload(path, file, { upsert: false, contentType: file.type });
-      if (error) throw error;
-      order.evidence = [...(order.evidence || []), { name: file.name, path, created_at: nowIso(), size: file.size, type: file.type }];
+      const result = await serverRequest(`/api/orders/${encodeURIComponent(order.id)}/photos`, { method: 'POST', body: file });
+      order.evidence = [...(order.evidence || []), result.photo];
     }
     await this.saveOrder(order);
   },
   async removePhoto(order, photo) {
     if (localMode) await deleteLocalPhoto(photo.localKey);
-    else if (photo.path) {
-      const { error } = await client.storage.from('workshop-evidence').remove([photo.path]);
-      if (error) throw error;
-    }
-    order.evidence = (order.evidence || []).filter((item) => item !== photo && item.localKey !== photo.localKey && item.path !== photo.path);
+    else if (photo.photoId) await serverRequest(`/api/orders/${encodeURIComponent(order.id)}/photos/${encodeURIComponent(photo.photoId)}`, { method: 'DELETE' });
+    order.evidence = (order.evidence || []).filter((item) => item !== photo && item.localKey !== photo.localKey && item.path !== photo.path && item.photoId !== photo.photoId);
     await this.saveOrder(order);
   }
 };
 
 function showAuth(mode) {
+  if (serverMode) document.body.classList.add('server-locked');
   let backdrop = $('#authBackdrop');
   if (!backdrop) {
     backdrop = document.createElement('div');
     backdrop.id = 'authBackdrop'; backdrop.className = 'auth-backdrop';
     document.body.append(backdrop);
   }
-  if (mode === 'workspace') {
-    backdrop.innerHTML = `<section class="auth-panel"><div class="eyebrow"><span class="dot"></span>Configuración inicial</div><h2>Registra tu taller</h2><p class="intro">El taller será el espacio privado para clientes, vehículos y órdenes. Los datos de la prueba local no se copiarán.</p><div class="field"><label for="workspaceName">Nombre del taller</label><input id="workspaceName" maxlength="120" placeholder="Ej. Taller Central" autocomplete="organization" /></div><div class="auth-actions"><button class="btn" id="createWorkspaceBtn">Crear espacio</button><button class="btn btn-light" id="authCancel">Cerrar</button></div><div id="authMessage" class="auth-error" role="status"></div></section>`;
-    $('#createWorkspaceBtn').addEventListener('click', createWorkspace);
-    $('#authCancel').addEventListener('click', () => client.auth.signOut().then(() => window.location.reload()));
-    return;
-  }
-  const signup = mode === 'signup';
-  backdrop.innerHTML = `<section class="auth-panel"><div class="eyebrow"><span class="dot"></span>Acceso seguro · Supabase</div><h2>${signup ? 'Crear cuenta de taller' : 'Iniciar sesión'}</h2><p class="intro">Usa tu correo y contraseña. Cada taller solo puede consultar sus propios registros.</p><form id="authForm"><div class="field"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" autocomplete="email" required /></div><div class="field"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" minlength="8" autocomplete="${signup ? 'new-password' : 'current-password'}" required /></div><div class="auth-actions"><button class="btn" type="submit">${signup ? 'Crear cuenta' : 'Entrar'}</button><button class="btn btn-light" id="authSwitch" type="button">${signup ? 'Ya tengo cuenta' : 'Crear cuenta'}</button></div><div id="authMessage" class="auth-error" role="status"></div></form></section>`;
-  $('#authSwitch').addEventListener('click', () => showAuth(signup ? 'signin' : 'signup'));
-  $('#authForm').addEventListener('submit', async (event) => {
+  backdrop.setAttribute('role', 'dialog');
+  backdrop.setAttribute('aria-modal', 'true');
+  backdrop.innerHTML = `<section class="auth-panel"><div class="eyebrow"><span class="dot"></span>Acceso al taller · red local</div><h2>Iniciar sesión</h2><p class="intro">Acceso reservado a técnicos mecánicos con cuenta autorizada. No hay registro abierto; si eres técnico, solicita una cuenta al responsable del servidor.</p><form id="localAuthForm"><div class="field"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" autocomplete="username" required /></div><div class="field"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" autocomplete="current-password" required /></div><div class="auth-actions"><button class="btn" id="authSubmit" type="submit">Entrar</button></div><div id="authMessage" class="auth-error" role="status" aria-live="polite"></div></form></section>`;
+  $('#localAuthForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const message = $('#authMessage');
     const email = $('#authEmail').value.trim(); const password = $('#authPassword').value;
+    const button = $('#authSubmit');
+    button.disabled = true;
     message.className = 'auth-success'; message.textContent = 'Conectando…';
     try {
-      const result = signup ? await client.auth.signUp({ email, password }) : await client.auth.signInWithPassword({ email, password });
-      if (result.error) throw result.error;
-      if (signup && !result.data.session) {
-        message.textContent = 'Revisa tu correo para confirmar la cuenta y luego inicia sesión.';
-        return;
-      }
-      user = result.data.user;
-      const ready = await backend.loadWorkspace();
-      if (ready) { renderAll(); notify('Sesión iniciada.'); }
+      const result = await serverRequest('/api/auth/login', { method: 'POST', body: { email, password } });
+      user = result.user;
+      await backend.loadData();
+      setConnection('Servidor SQLite', 'server');
+      setProfile(); hideAuth(); renderAll();
+      startServerRefresh();
+      if (orders.length) fillForm(orders[0]); else clearForm();
+      showView('home'); notify('Sesión iniciada.');
     } catch (error) { message.className = 'auth-error'; message.textContent = error.message || 'No se pudo iniciar sesión.'; }
+    finally { button.disabled = false; }
   });
 }
-function hideAuth() { $('#authBackdrop')?.remove(); }
-async function createWorkspace() {
-  const name = $('#workspaceName')?.value.trim();
-  const message = $('#authMessage');
-  if (!name || name.length < 2) { message.textContent = 'Escribe un nombre de al menos 2 caracteres.'; return; }
-  $('#createWorkspaceBtn').disabled = true;
-  try {
-    const { data: newWorkshop, error } = await client.from('workshops').insert({ name, created_by: user.id }).select().single();
-    if (error) throw error;
-    const { error: memberError } = await client.from('workshop_members').insert({ workshop_id: newWorkshop.id, user_id: user.id, role: 'owner' });
-    if (memberError) throw memberError;
-    await backend.loadWorkspace(); renderAll(); notify('Taller configurado.');
-  } catch (error) { message.textContent = error.message || 'No se pudo crear el taller.'; $('#createWorkspaceBtn').disabled = false; }
-}
+function hideAuth() { $('#authBackdrop')?.remove(); document.body.classList.remove('server-locked'); }
 
 function addExtraUi() {
   const receiptActions = $('#view-reception .form-actions');
@@ -373,7 +349,80 @@ function addExtraUi() {
     const banner = $('#view-home .demo-banner');
     if (banner) banner.insertAdjacentHTML('afterend', '<button type="button" class="demo-reset" id="resetDemoBtn">Restablecer el registro ficticio de demostración</button>');
   }
+  if (cleanTestBuild && !$('#resetTestBtn')) {
+    const banner = $('#view-home .demo-banner');
+    if (banner) banner.insertAdjacentHTML('afterend', '<button type="button" class="demo-reset" id="resetTestBtn">Reiniciar la prueba y borrar lo capturado</button>');
+  }
   if (!$('#expenseModal')) document.body.insertAdjacentHTML('beforeend', `<div class="modal-backdrop" id="expenseModal"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="expenseTitle"><div class="modal-head"><h2 id="expenseTitle">Registrar gasto real</h2><button class="icon-btn" type="button" id="closeExpense" aria-label="Cerrar">×</button></div><form id="expenseForm"><div class="field-grid"><div class="field"><label for="expenseDate">Fecha</label><input id="expenseDate" type="date" required /></div><div class="field"><label for="expenseCategory">Rubro</label><select id="expenseCategory" required>${CATEGORIES.map((category) => `<option>${escapeHtml(category)}</option>`).join('')}</select></div><div class="field full"><label for="expenseDescription">Descripción</label><input id="expenseDescription" maxlength="160" required placeholder="Ej. Compra de refacciones" /></div><div class="field"><label for="expenseAmount">Importe (MXN)</label><input id="expenseAmount" type="number" min="0.01" step="0.01" inputmode="decimal" required /></div><div class="field"><label for="expenseOrder">Orden relacionada</label><select id="expenseOrder"><option value="">Sin orden</option></select></div></div><div class="modal-actions"><button class="btn btn-light" type="button" id="cancelExpense">Cancelar</button><button class="btn btn-teal" type="submit">Guardar gasto</button></div></form></div></div>`);
+}
+
+function setupTeamUi() {
+  const profile = $('.side-bottom .profile');
+  if (profile && !$('#openTeamBtn')) {
+    const button = document.createElement('button');
+    button.id = 'openTeamBtn'; button.type = 'button'; button.className = 'profile team-profile';
+    button.innerHTML = profile.innerHTML;
+    profile.replaceWith(button);
+  }
+  if (!$('#teamProfileStyles')) document.head.insertAdjacentHTML('beforeend', '<style id="teamProfileStyles">.team-profile{width:100%;border:0;background:transparent;color:inherit;text-align:left;border-radius:12px;cursor:pointer;transition:background .15s}.team-profile:hover:not(:disabled){background:#f6f8f5}.team-profile:disabled{opacity:1;cursor:default}</style>');
+  const technician = $('#technician');
+  if (technician && !$('#teamMemberSuggestions')) {
+    technician.setAttribute('list', 'teamMemberSuggestions');
+    technician.insertAdjacentHTML('afterend', '<datalist id="teamMemberSuggestions"></datalist>');
+  }
+  if (!$('#teamModal')) document.body.insertAdjacentHTML('beforeend', `<div class="modal-backdrop" id="teamModal"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="teamModalTitle"><div class="modal-head"><h2 id="teamModalTitle">Equipo local</h2><button class="icon-btn" type="button" id="closeTeamModal" aria-label="Cerrar">×</button></div><p>Organiza a las personas que trabajan en el taller y úsalas como sugerencias al asignar un responsable.</p><form id="teamNameForm"><div class="field"><label for="teamNameInput">Nombre del taller o equipo</label><input id="teamNameInput" maxlength="80" required /></div><div class="modal-actions"><button class="btn btn-light" type="submit">Guardar nombre</button></div></form><form id="teamMemberForm" style="margin-top:15px;padding-top:14px;border-top:1px solid var(--line)"><div class="field-grid"><div class="field"><label for="teamMemberName">Nombre del integrante</label><input id="teamMemberName" maxlength="100" required placeholder="Nombre" /></div><div class="field"><label for="teamMemberRole">Función (opcional)</label><input id="teamMemberRole" maxlength="80" placeholder="Ej. Técnico automotriz" /></div></div><div class="modal-actions"><button class="btn btn-teal" type="submit">Agregar al equipo</button></div></form><div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px"><strong style="font-size:10px">Integrantes</strong><span id="teamMemberCount" class="badge gray">0 integrantes</span></div><div id="teamMembersList" style="max-height:190px;overflow:auto;margin-top:8px"></div><div class="callout" style="margin-top:12px"><strong>Solo en este dispositivo:</strong> esta lista no crea cuentas, no controla permisos y no se sincroniza. Los nombres quedan en este navegador; puedes seguir escribiendo cualquier responsable directamente en Recepción.</div></div></div>`);
+  renderTeamUi();
+}
+
+function renderTeamUi() {
+  const list = $('#teamMembersList');
+  const datalist = $('#teamMemberSuggestions');
+  const count = $('#teamMemberCount');
+  if (count) count.textContent = `${teamMembers.length} integrante${teamMembers.length === 1 ? '' : 's'}`;
+  if (list) list.innerHTML = teamMembers.length ? teamMembers.map((member) => `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line)"><div><strong style="font-size:10px">${escapeHtml(member.name)}</strong><div class="hint">${escapeHtml(member.role || 'Función sin indicar')}</div></div><button class="text-btn" type="button" data-remove-team-member="${escapeHtml(member.id)}" aria-label="Quitar a ${escapeHtml(member.name)}">Quitar</button></div>`).join('') : '<div class="empty-state" style="padding:14px 8px">Aún no hay integrantes. Agrega nombres si quieres usarlos como sugerencias.</div>';
+  if (datalist) datalist.innerHTML = teamMembers.map((member) => `<option value="${escapeHtml(member.name)}">${escapeHtml(member.role)}</option>`).join('');
+}
+
+function openTeamModal() {
+  if (!localMode || publicDemoBuild) return;
+  $('#teamNameInput').value = localTeamName;
+  renderTeamUi();
+  $('#teamModal').classList.add('open');
+  $('#teamMemberName').focus();
+}
+function closeTeamModal() { $('#teamModal')?.classList.remove('open'); }
+function saveTeamName(event) {
+  event.preventDefault();
+  if (!localMode || publicDemoBuild) return;
+  const value = $('#teamNameInput').value.trim();
+  if (!value) { notify('Escribe el nombre del taller o equipo.'); return; }
+  localTeamName = value;
+  writeLocal(LOCAL_TEAM_NAME_KEY, localTeamName);
+  setProfile();
+  notify('Nombre del equipo guardado en este dispositivo.');
+}
+function saveTeamMember(event) {
+  event.preventDefault();
+  if (!localMode || publicDemoBuild) return;
+  const name = $('#teamMemberName').value.trim();
+  const role = $('#teamMemberRole').value.trim();
+  if (!name) return;
+  if (teamMembers.some((member) => member.name.toLocaleLowerCase('es-MX') === name.toLocaleLowerCase('es-MX'))) {
+    notify('Ese integrante ya está en la lista.');
+    return;
+  }
+  teamMembers.push({ id: uuid(), name, role });
+  writeLocal(LOCAL_TEAM_KEY, teamMembers);
+  renderTeamUi();
+  $('#teamMemberForm').reset();
+  $('#teamMemberName').focus();
+  notify('Integrante agregado al equipo local.');
+}
+function removeTeamMember(id) {
+  teamMembers = teamMembers.filter((member) => member.id !== id);
+  writeLocal(LOCAL_TEAM_KEY, teamMembers);
+  renderTeamUi();
+  notify('Integrante quitado de las sugerencias. Los expedientes existentes no cambian.');
 }
 
 function showView(key) {
@@ -391,7 +440,7 @@ function clearForm() {
   ['custName','custPhone','custCity','custAddress','custNotes','plate','vin','make','model','year','color','vehicleNotes','failure','reportedIssue','odometer','physicalNotes','valuables','workScope','estimateTotal'].forEach((id) => { const el = $(`#${id}`); if (el) el.value = ''; });
   $('#receivedAt').value = localDateTime();
   $('#reason').value = 'Seleccionar motivo';
-  $('#technician').value = 'Seleccionar técnico';
+  $('#technician').value = '';
   $$('.fuel-option').forEach((el) => el.classList.remove('selected'));
   $$('#accessoriesList input, #documentsList input').forEach((el) => { el.checked = false; });
   $$('.fluid-item select').forEach((el) => { el.value = 'Revisar'; });
@@ -410,7 +459,7 @@ function fillForm(order) {
   Object.entries(fields).forEach(([id, value]) => { const el = $(`#${id}`); if (el) el.value = value ?? ''; });
   $('#receivedAt').value = localDateTime(order.received_at || new Date());
   $('#reason').value = order.reason || 'Seleccionar motivo';
-  $('#technician').value = order.technician || 'Seleccionar técnico';
+  $('#technician').value = order.technician || '';
   $$('.fuel-option').forEach((el) => el.classList.toggle('selected', el.textContent.trim() === order.fuel_level));
   const checkSet = (container, values) => $$('#' + container + ' label').forEach((label) => { const input = $('input', label); input.checked = (values || []).includes(label.textContent.trim()); });
   checkSet('accessoriesList', order.inventory?.accessories);
@@ -436,7 +485,7 @@ function readForm(previous = {}) {
     id: previous.id || uuid(), order_number: previous.order_number || nextOrderNumber(), is_demo: Boolean(previous.is_demo),
     customer: { name: $('#custName').value.trim(), phone: $('#custPhone').value.trim(), city: $('#custCity').value.trim(), address: $('#custAddress').value.trim(), notes: $('#custNotes').value.trim() },
     vehicle: { plate: $('#plate').value.trim().toUpperCase(), vin: $('#vin').value.trim(), make: $('#make').value.trim(), model: $('#model').value.trim(), year: $('#year').value.trim(), color: $('#color').value.trim(), notes: $('#vehicleNotes').value.trim() },
-    received_at: received, reason: $('#reason').value, technician: $('#technician').value.includes('Seleccionar') ? '' : $('#technician').value,
+    received_at: received, reason: $('#reason').value, technician: $('#technician').value.trim(),
     failure_summary: $('#failure').value.trim(), reported_issue: $('#reportedIssue').value.trim(),
     odometer: Number(String($('#odometer').value).replace(/[^\d]/g, '')) || null,
     fuel_level: $('.fuel-option.selected')?.textContent.trim() || '', physical_notes: $('#physicalNotes').value.trim(),
@@ -460,7 +509,7 @@ function validateReception() {
   return true;
 }
 async function saveReception(next = 'draft') {
-  if ((next !== 'draft' || !localMode) && !validateReception()) return null;
+  if (next !== 'draft' && !validateReception()) return null;
   const previous = orderById(activeOrderId) || {};
   const order = readForm(previous);
   if (next === 'draft' && !previous.status) order.status = 'Borrador';
@@ -522,14 +571,17 @@ function renderDashboard() {
   const counts = $$('.flow-step .step-count', $('#view-home'));
   [orders.filter((o) => !['Cancelada'].includes(o.status)).length, inspections.length, ready.length, pending.length].forEach((value, index) => { if (counts[index]) counts[index].textContent = String(value).padStart(2, '0'); });
   const badge = $('#view-home .dashboard-grid .flow-head .badge');
-  if (badge) { badge.textContent = publicDemoBuild ? 'Demo aislada' : localMode ? 'Local' : 'En vivo'; badge.className = `badge ${publicDemoBuild ? 'violet' : localMode ? 'amber' : 'green'}`; }
+  if (badge) { badge.textContent = publicDemoBuild ? 'Demo aislada' : cleanTestBuild ? 'Prueba limpia' : 'SQLite local'; badge.className = `badge ${publicDemoBuild ? 'violet' : cleanTestBuild ? 'blue' : 'green'}`; }
   const banner = $('#view-home .demo-banner div');
   if (banner) banner.innerHTML = publicDemoBuild
     ? '<strong>Demostración:</strong> contiene un expediente inventado y separado de los datos operativos. Los cambios de esta demo se quedan en este navegador.'
-    : localMode
+    : cleanTestBuild
+      ? '<strong>Prueba limpia:</strong> no hay registros precargados. Lo que captures se guarda solo en este navegador, separado de los datos habituales; no usa backend ni genera cargos.'
+      : localMode
       ? '<strong>Modo local sin costo de servidor:</strong> las órdenes y gastos empiezan vacíos y se guardan solo en este navegador. No se sincronizan con otros dispositivos; puedes exportar listas CSV. Las fotos permanecen en este navegador.'
-      : '<strong>Datos del taller:</strong> los registros se guardan en el espacio privado configurado. La aprobación es un registro interno; no se envían mensajes.';
+      : '<strong>Servidor local del taller:</strong> órdenes, gastos y fotos se comparten en la red del taller y se guardan en SQLite. Solo entran técnicos con cuenta autorizada; no requiere Supabase ni servicios de pago.';
   if ($('#resetDemoBtn')) $('#resetDemoBtn').hidden = !publicDemoBuild;
+  if ($('#resetTestBtn')) $('#resetTestBtn').hidden = !cleanTestBuild;
   const homeMeta = $('#view-home .dashboard-grid .card-meta');
   if (homeMeta) homeMeta.textContent = 'Atajos a la siguiente acción · órdenes guardadas';
   const homeFoot = $('#view-home .dashboard-grid .table-foot span:first-child');
@@ -697,7 +749,7 @@ async function openPdfOrder(id) {
   const line = (a, b) => `<div class="pdf-line"><span>${escapeHtml(a)}</span><b>${escapeHtml(b || 'Sin capturar')}</b></div>`;
   const fluidText = Object.entries(order.inspection?.fluids || {}).map(([name, value]) => `${name}: ${value}`).join(' · ') || 'Pendiente';
   const inv = order.inventory || {};
-  $('.pdf-paper').innerHTML = `<div class="pdf-top"><div><div class="pdf-brand">Taller Control</div><div class="pdf-sub">Recepción de vehículo · ${localMode ? 'registro local' : 'expediente del taller'}</div></div><div class="pdf-folio"><strong>${escapeHtml(orderNumber(order))}</strong><span>${escapeHtml(fmtDate(order.received_at))}</span></div></div><h2 class="pdf-title">Orden de recepción y servicio</h2><div class="pdf-intro">Registro de la información proporcionada al ingreso y condición documentada del vehículo.</div><div class="preview-checks" style="margin-top:12px"><span class="badge ${order.is_demo ? 'amber' : 'green'}">${order.is_demo ? 'Prueba ficticia' : 'Registro guardado'}</span><span class="badge ${statusClass(order.status)}">${escapeHtml(order.status)}</span><span class="badge blue">Evidencia ${(order.evidence || []).length} fotos</span></div><div class="pdf-grid"><section class="pdf-box"><h3>Cliente</h3>${line('Nombre', order.customer?.name)}${line('Teléfono', order.customer?.phone)}${line('Dirección', order.customer?.address)}${line('Ciudad', order.customer?.city)}${line('Observaciones', order.customer?.notes)}</section><section class="pdf-box"><h3>Vehículo</h3>${line('Marca / modelo', orderTitle(order))}${line('Año / color', `${order.vehicle?.year || ''} · ${order.vehicle?.color || ''}`)}${line('Placas', order.vehicle?.plate)}${line('VIN', order.vehicle?.vin)}${line('Observaciones', order.vehicle?.notes)}</section><section class="pdf-box"><h3>Ingreso y lecturas</h3>${line('Motivo', order.reason)}${line('Técnico', order.technician || 'Por asignar')}${line('Kilometraje', order.odometer ? `${Number(order.odometer).toLocaleString('es-MX')} km` : '')}${line('Combustible', order.fuel_level)}</section><section class="pdf-box"><h3>Falla y condición física</h3>${line('Falla según cliente', order.reported_issue || order.failure_summary)}${line('Daños / observaciones', order.physical_notes)}</section></div><div class="pdf-notes"><b>Fluidos:</b> ${escapeHtml(fluidText)}</div><div class="pdf-notes"><b>Accesorios:</b> ${escapeHtml((inv.accessories || []).join(', ') || 'Ninguno marcado')}<br><b>Documentos:</b> ${escapeHtml((inv.documents || []).join(', ') || 'Ninguno marcado')}<br><b>Objetos declarados:</b> ${escapeHtml(inv.valuables || 'Sin declarar')}<br><b>Trabajo propuesto:</b> ${escapeHtml(order.work_scope || 'Sin definir')}<br><b>Estimación:</b> ${escapeHtml(money(order.estimate_total))}</div>${evidenceMarkup ? `<div class="print-evidence">${evidenceMarkup}</div>` : '<div class="pdf-notes"><b>Evidencia fotográfica:</b> No se adjuntaron fotografías.</div>'}<div class="pdf-signatures"><div class="signature">Entrega del vehículo · nombre y firma</div><div class="signature">Recepción en taller · nombre y firma</div></div><div class="pdf-disclaimer">Formato de control interno. Las firmas impresas requieren firma manuscrita; el registro digital no representa una firma electrónica ni una aprobación del cliente.</div>`;
+  $('.pdf-paper').innerHTML = `<div class="pdf-top"><div><div class="pdf-brand">Taller Control</div><div class="pdf-sub">Recepción de vehículo · ${serverMode ? 'servidor SQLite del taller' : 'registro local'}</div></div><div class="pdf-folio"><strong>${escapeHtml(orderNumber(order))}</strong><span>${escapeHtml(fmtDate(order.received_at))}</span></div></div><h2 class="pdf-title">Orden de recepción y servicio</h2><div class="pdf-intro">Registro de la información proporcionada al ingreso y condición documentada del vehículo.</div><div class="preview-checks" style="margin-top:12px"><span class="badge ${order.is_demo ? 'amber' : 'green'}">${order.is_demo ? 'Prueba ficticia' : 'Registro guardado'}</span><span class="badge ${statusClass(order.status)}">${escapeHtml(order.status)}</span><span class="badge blue">Evidencia ${(order.evidence || []).length} fotos</span></div><div class="pdf-grid"><section class="pdf-box"><h3>Cliente</h3>${line('Nombre', order.customer?.name)}${line('Teléfono', order.customer?.phone)}${line('Dirección', order.customer?.address)}${line('Ciudad', order.customer?.city)}${line('Observaciones', order.customer?.notes)}</section><section class="pdf-box"><h3>Vehículo</h3>${line('Marca / modelo', orderTitle(order))}${line('Año / color', `${order.vehicle?.year || ''} · ${order.vehicle?.color || ''}`)}${line('Placas', order.vehicle?.plate)}${line('VIN', order.vehicle?.vin)}${line('Observaciones', order.vehicle?.notes)}</section><section class="pdf-box"><h3>Ingreso y lecturas</h3>${line('Motivo', order.reason)}${line('Técnico', order.technician || 'Por asignar')}${line('Kilometraje', order.odometer ? `${Number(order.odometer).toLocaleString('es-MX')} km` : '')}${line('Combustible', order.fuel_level)}</section><section class="pdf-box"><h3>Falla y condición física</h3>${line('Falla según cliente', order.reported_issue || order.failure_summary)}${line('Daños / observaciones', order.physical_notes)}</section></div><div class="pdf-notes"><b>Fluidos:</b> ${escapeHtml(fluidText)}</div><div class="pdf-notes"><b>Accesorios:</b> ${escapeHtml((inv.accessories || []).join(', ') || 'Ninguno marcado')}<br><b>Documentos:</b> ${escapeHtml((inv.documents || []).join(', ') || 'Ninguno marcado')}<br><b>Objetos declarados:</b> ${escapeHtml(inv.valuables || 'Sin declarar')}<br><b>Trabajo propuesto:</b> ${escapeHtml(order.work_scope || 'Sin definir')}<br><b>Estimación:</b> ${escapeHtml(money(order.estimate_total))}</div>${evidenceMarkup ? `<div class="print-evidence">${evidenceMarkup}</div>` : '<div class="pdf-notes"><b>Evidencia fotográfica:</b> No se adjuntaron fotografías.</div>'}<div class="pdf-signatures"><div class="signature">Entrega del vehículo · nombre y firma</div><div class="signature">Recepción en taller · nombre y firma</div></div><div class="pdf-disclaimer">Formato de control interno. Las firmas impresas requieren firma manuscrita; el registro digital no representa una firma electrónica ni una aprobación del cliente.</div>`;
   $('#orderList').style.display = 'none'; $('#printArea').style.display = 'block';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -723,11 +775,7 @@ async function photoUrl(photo) {
     const blob = await getLocalPhoto(photo.localKey);
     return blob ? URL.createObjectURL(blob) : '';
   }
-  if (photo.path && client) {
-    const { data, error } = await client.storage.from('workshop-evidence').createSignedUrl(photo.path, 1800);
-    if (error) throw error;
-    return data.signedUrl;
-  }
+  if (photo.photoId && serverMode) return `/api/evidence/${encodeURIComponent(photo.photoId)}`;
   return '';
 }
 async function addPhotos(files) {
@@ -866,6 +914,15 @@ async function recordDecision(approved) {
 
 function registerEvents() {
   document.addEventListener('click', handleNavigation);
+  $('#openTeamBtn')?.addEventListener('click', openTeamModal);
+  $('#closeTeamModal')?.addEventListener('click', closeTeamModal);
+  $('#teamModal')?.addEventListener('click', (event) => { if (event.target === $('#teamModal')) closeTeamModal(); });
+  $('#teamNameForm')?.addEventListener('submit', saveTeamName);
+  $('#teamMemberForm')?.addEventListener('submit', saveTeamMember);
+  $('#teamMembersList')?.addEventListener('click', (event) => {
+    const remove = event.target.closest('[data-remove-team-member]');
+    if (remove) removeTeamMember(remove.dataset.removeTeamMember);
+  });
   $('#menuBtn')?.addEventListener('click', () => $('#sidebar').classList.toggle('open'));
   $('#searchBtn')?.addEventListener('click', () => { showView('orders'); setTimeout(() => $('#orderSearch')?.focus(), 120); });
   $('#notifyBtn')?.addEventListener('click', () => { approvalOrderId = orders.find((order) => order.approval_status === 'pending')?.id || orders[0]?.id || null; renderApprovalSummary(); showView('approval'); notify(`${orders.filter((order) => order.approval_status === 'pending').length} aprobación(es) pendiente(s).`); });
@@ -906,6 +963,19 @@ function registerEvents() {
     const sample = demoOrder();
     writeLocal(LOCAL_ORDERS_KEY, [sample]); writeLocal(LOCAL_EXPENSES_KEY, []); orders = [sample]; expenses = []; activeOrderId = null; approvalOrderId = sample.id; renderAll(); notify('Demo ficticia restablecida.');
   });
+  $('#resetTestBtn')?.addEventListener('click', async () => {
+    if (!cleanTestBuild || !window.confirm('Esto borrará las órdenes, gastos, fotos y equipo local creados en esta prueba, sin tocar los datos habituales. ¿Continuar?')) return;
+    try {
+      const photoKeys = orders.flatMap((order) => order.evidence || []).map((photo) => photo.localKey).filter(Boolean);
+      await Promise.all(photoKeys.map(deleteLocalPhoto));
+      orders = []; expenses = [];
+      writeLocal(LOCAL_ORDERS_KEY, orders); writeLocal(LOCAL_EXPENSES_KEY, expenses);
+      teamMembers = []; localTeamName = 'Equipo de taller';
+      writeLocal(LOCAL_TEAM_KEY, teamMembers); writeLocal(LOCAL_TEAM_NAME_KEY, localTeamName);
+      activeOrderId = null; approvalOrderId = null;
+      clearForm(); setProfile(); renderAll(); showView('home'); notify('Prueba limpia: se borraron los datos capturados y el equipo local.');
+    } catch (error) { notify(`No se pudieron borrar los datos de prueba: ${error.message || 'intenta de nuevo.'}`); }
+  });
   document.addEventListener('click', async (event) => {
     const add = event.target.closest('[data-photo-add]');
     if (add) { $('#photoInput').click(); return; }
@@ -923,7 +993,7 @@ function registerEvents() {
     }
   });
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') { $('#modalBackdrop')?.classList.remove('open'); $('#expenseModal')?.classList.remove('open'); $('#sidebar')?.classList.remove('open'); }
+    if (event.key === 'Escape') { $('#modalBackdrop')?.classList.remove('open'); $('#expenseModal')?.classList.remove('open'); closeTeamModal(); $('#sidebar')?.classList.remove('open'); }
   });
   window.addEventListener('online', () => { if (localMode) setConnection('Modo local', 'local'); });
   window.addEventListener('offline', () => setConnection('Sin conexión', 'offline'));
@@ -938,7 +1008,7 @@ function registerEvents() {
 function updateStaticText() {
   $('#topDate').textContent = new Intl.DateTimeFormat('es-MX', { dateStyle: 'medium' }).format(new Date());
   const footer = $('.footer-note');
-  if (footer) footer.textContent = publicDemoBuild ? 'DEMO AISLADA · DATOS FICTICIOS · SIN SERVICIOS EXTERNOS' : localMode ? 'MODO LOCAL · DATOS EN ESTE NAVEGADOR · SIN COSTO DE SERVIDOR' : 'TALLER CONTROL · EXPEDIENTE PRIVADO DEL TALLER';
+  if (footer) footer.textContent = publicDemoBuild ? 'DEMO AISLADA · DATOS FICTICIOS · SIN SERVICIOS EXTERNOS' : cleanTestBuild ? 'PRUEBA LIMPIA · SIN DATOS PRECARGADOS · ALMACENAMIENTO LOCAL SEPARADO' : 'TALLER CONTROL · SQLITE LOCAL · ACCESO SOLO PARA TÉCNICOS';
   $('#view-orders .page-sub').textContent = 'Busca, filtra y abre expedientes; imprime o guarda la orden como PDF.';
   const demoNote = $('#view-orders .demo-banner div');
   if (demoNote) demoNote.innerHTML = '<strong>Orden imprimible:</strong> genera una vista del expediente actual. La impresión contiene espacios de firma manuscrita; no es una firma electrónica.';
@@ -946,22 +1016,30 @@ function updateStaticText() {
   if (approvalIntro) approvalIntro.textContent = 'Registra solicitud y respuesta recibida; el sistema no envía mensajes ni firma por el cliente.';
   $('#simulateApproval').textContent = 'Registrar solicitud interna';
   const ordersFoot = $('#view-orders .table-foot span:first-child');
-  if (ordersFoot) ordersFoot.textContent = localMode ? 'Datos locales de este navegador.' : 'Órdenes del espacio de trabajo.';
+  if (ordersFoot) ordersFoot.textContent = localMode ? 'Datos locales de este navegador.' : 'Órdenes compartidas en la base SQLite local.';
   const sideNote = $('.side-note p');
-  if (sideNote) sideNote.textContent = localMode ? 'Recepción, inspección, órdenes, aprobación interna y gastos; guardados en este navegador.' : 'Recepción, inspección, órdenes, aprobación interna y gastos del taller.';
+  if (sideNote) sideNote.textContent = localMode ? 'Recepción, inspección, órdenes, aprobación interna y gastos; guardados en este navegador.' : 'Órdenes, gastos y evidencia compartidos en SQLite dentro de la red local del taller.';
+  const storageCallout = $$('#view-reception .summary-card .callout').find((item) => item.textContent.includes('Almacenamiento local'));
+  if (storageCallout && serverMode) storageCallout.innerHTML = '<strong>Almacenamiento del taller:</strong> esta recepción se comparte con las demás sesiones autorizadas en SQLite local.';
 }
 
 async function start() {
-  addExtraUi(); updateStaticText(); registerEvents();
+  if (serverMode) document.body.classList.add('server-locked');
+  document.documentElement.classList.remove('app-pending');
+  addExtraUi(); setupTeamUi(); updateStaticText(); registerEvents();
   $('#stateFilter').innerHTML = '<option value="">Todos los estados</option>' + STATUSES.map((status) => `<option>${escapeHtml(status)}</option>`).join('');
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('/service-worker.js').catch((error) => console.warn('PWA no pudo registrarse:', error.message));
   try {
     const ready = await backend.boot();
-    if (ready) { renderAll(); if (orders.length) fillForm(orders[0]); else clearForm(); showView('home'); }
+    if (ready) { renderAll(); if (orders.length) fillForm(orders[0]); else clearForm(); showView('home'); startServerRefresh(); }
   } catch (error) {
     console.error(error);
-    notify(`No se pudo abrir el taller: ${error.message}`);
     setConnection('Error de conexión', 'offline');
+    if (serverMode) {
+      showAuth('signin');
+      const message = $('#authMessage');
+      message.textContent = `No se pudo contactar al servidor local: ${error.message}`;
+    } else notify(`No se pudo abrir el taller: ${error.message}`);
   }
 }
 
