@@ -14,30 +14,19 @@ En la computadora que alojará la base de datos, abre una terminal en la carpeta
 
 ```bash
 npm install
+npm run manager:init
 npm run local
 ```
 
-`npm install` instala las dependencias locales del proyecto. `npm run local` compila la app, arranca el servidor SQLite en el puerto 3000 y abre automáticamente `http://localhost:3000` en el navegador de esa computadora. Aparece la pantalla de inicio de sesión; cada técnico entra con su cuenta autorizada y después puede usar la web app. Si ya hay una sesión vigente, se reanuda sin volver a pedir la contraseña; las sesiones vencen a las 12 horas y también se pueden cerrar desde la app. La terminal muestra además las direcciones para que los demás dispositivos del taller entren, por ejemplo `http://192.168.1.20:3000`.
+`npm install` instala las dependencias locales del proyecto. Antes del primer arranque, `npm run manager:init` crea una sola vez la cuenta del encargado inicial: pide nombre y correo, y solicita una contraseña dos veces sin mostrarla mientras se escribe. La contraseña debe tener al menos 12 caracteres. Solo funciona si aún no existe un encargado; también admite una base previa que ya tenga técnicos. No crea órdenes ni gastos. Después, `npm run local` compila la app, arranca el servidor SQLite en el puerto 3000 y abre automáticamente `http://localhost:3000` en el navegador de esa computadora. El encargado inicia sesión y puede administrar las cuentas desde su perfil en la parte inferior izquierda. Si ya hay una sesión vigente, se reanuda sin volver a pedir la contraseña; las sesiones vencen a las 12 horas y también se pueden cerrar desde la app. La terminal muestra además las direcciones para que los demás dispositivos del taller entren, por ejemplo `http://192.168.1.20:3000`.
 
 Si el navegador no se abre automáticamente, visita `http://localhost:3000` en la computadora del servidor o la dirección de red mostrada en la terminal desde otro dispositivo autorizado. En un equipo sin entorno gráfico, la apertura automática se puede desactivar con `TALLER_NO_OPEN_BROWSER=1`; el servidor seguirá mostrando las direcciones disponibles.
 
 Si el firewall de la computadora lo solicita, permite el puerto TCP 3000 únicamente en la red privada del taller. No configures reenvío del puerto en el router ni exposición pública. Para dejar de compartir la app, detén el proceso con `Ctrl+C`.
 
-## Dar acceso a técnicos mecánicos
+## Administrar técnicos autorizados
 
-No existe registro desde la página. El responsable que tenga acceso a la terminal de la computadora del servidor crea una cuenta por técnico:
-
-```bash
-npm run user:add -- --email mecanico@taller.mx --name "Nombre del técnico"
-```
-
-El comando solicita la contraseña dos veces y no la muestra mientras se escribe. Debe tener al menos 12 caracteres. Repite el comando para cada mecánico autorizado. Todas las cuentas tienen el rol fijo **Técnico mecánico**; la interfaz no permite crear otros roles ni cuentas. Un usuario sin cuenta no puede consultar órdenes, gastos ni fotografías.
-
-Para retirar el acceso y cerrar las sesiones vigentes de un técnico:
-
-```bash
-npm run user:disable -- --email mecanico@taller.mx
-```
+No existe registro público. Una vez iniciada la sesión como encargado, abre el perfil de la parte inferior izquierda para agregar técnicos: captura su nombre, correo y una contraseña inicial de al menos 12 caracteres, y compártela con la persona por un canal privado. Desde esa misma pantalla puedes desactivar o reactivar cuentas. Desactivar revoca sus sesiones activas; los registros históricos permanecen. Los técnicos no pueden administrar cuentas. La cuenta del encargado inicial se crea únicamente con `npm run manager:init`; cuando ya existe, ese comando no vuelve a funcionar.
 
 ## Datos y separación de la demo
 

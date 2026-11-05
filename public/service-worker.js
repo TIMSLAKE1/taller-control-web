@@ -1,4 +1,4 @@
-const CACHE = 'taller-control-shell-v3';
+const CACHE = 'taller-control-shell-v4';
 const APP_SHELL = ['/','/manifest.webmanifest','/icons/icon.svg'];
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));

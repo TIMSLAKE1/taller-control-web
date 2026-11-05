@@ -24,6 +24,7 @@ db.exec(`
     password_salt TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'mechanic' CHECK (role = 'mechanic'),
+    is_manager INTEGER NOT NULL DEFAULT 0 CHECK (is_manager IN (0, 1)),
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
     created_at TEXT NOT NULL
   );
@@ -75,11 +76,17 @@ db.exec(`
   );
 `);
 
+const userColumns = db.prepare('PRAGMA table_info(users)').all();
+if (!userColumns.some((column) => column.name === 'is_manager')) {
+  db.exec('ALTER TABLE users ADD COLUMN is_manager INTEGER NOT NULL DEFAULT 0 CHECK (is_manager IN (0, 1))');
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_single_manager_idx ON users(is_manager) WHERE is_manager = 1');
+
 export function getDatabase() { return db; }
 export function nowIso() { return new Date().toISOString(); }
 export function hashToken(token) { return createHash('sha256').update(token).digest('hex'); }
 export function publicUser(user) {
-  return { id: user.id, email: user.email, display_name: user.display_name, role: user.role };
+  return { id: user.id, email: user.email, display_name: user.display_name, role: Number(user.is_manager) === 1 ? 'manager' : user.role };
 }
 
 export function createMechanic({ email, displayName, password }) {
@@ -104,12 +111,31 @@ export function createMechanic({ email, displayName, password }) {
   return publicUser(user);
 }
 
-export function deactivateMechanic(email) {
-  const normalizedEmail = String(email || '').trim().toLowerCase();
-  const user = db.prepare('SELECT id FROM users WHERE email = ? COLLATE NOCASE AND role = \'mechanic\'').get(normalizedEmail);
-  if (!user) throw new Error('No se encontró una cuenta de técnico mecánico con ese correo.');
-  db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(user.id);
-  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+export function createInitialManager({ email, displayName, password }) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const count = db.prepare('SELECT COUNT(*) AS count FROM users WHERE is_manager = 1').get().count;
+    if (count !== 0) throw new Error('El encargado inicial ya existe; este comando solo se puede ejecutar una vez.');
+    const user = createMechanic({ email, displayName, password });
+    db.prepare('UPDATE users SET is_manager = 1 WHERE id = ?').run(user.id);
+    db.exec('COMMIT');
+    return publicUser({ ...user, is_manager: 1 });
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export function listMechanics() {
+  return db.prepare(`SELECT id, email, display_name, active, created_at FROM users
+    WHERE role = 'mechanic' AND is_manager = 0 ORDER BY active DESC, display_name COLLATE NOCASE`).all();
+}
+
+export function setMechanicActive(id, active) {
+  const user = db.prepare(`SELECT id FROM users WHERE id = ? AND role = 'mechanic' AND is_manager = 0`).get(id);
+  if (!user) throw new Error('No se encontró una cuenta de técnico mecánico administrable.');
+  db.prepare('UPDATE users SET active = ? WHERE id = ?').run(active ? 1 : 0, user.id);
+  if (!active) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
 }
 
 export function verifyPassword(user, password) {

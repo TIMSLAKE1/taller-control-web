@@ -7,7 +7,8 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import {
-  dataDir, evidenceDir, getDatabase, hashToken, nowIso, publicUser, verifyPassword
+  dataDir, evidenceDir, getDatabase, hashToken, nowIso, publicUser, verifyPassword,
+  createMechanic, listMechanics, setMechanicActive
 } from './db.js';
 
 const db = getDatabase();
@@ -96,7 +97,7 @@ function validateOrigin(req) {
 function getSession(req) {
   const token = cookieValue(req, 'taller_session');
   if (!/^[a-f0-9]{64}$/.test(token)) return null;
-  const row = db.prepare(`SELECT s.token_hash, s.expires_at, u.id, u.email, u.display_name, u.role, u.active
+  const row = db.prepare(`SELECT s.token_hash, s.expires_at, u.id, u.email, u.display_name, u.role, u.is_manager, u.active
     FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?`).get(hashToken(token));
   if (!row || row.active !== 1 || row.expires_at <= Date.now()) {
     if (row) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(row.token_hash);
@@ -109,6 +110,9 @@ function requireMechanic(req) {
   if (!session) fail(401, 'Inicia sesión con una cuenta de técnico mecánico.');
   if (session.role !== 'mechanic') fail(403, 'Esta cuenta no tiene permiso para usar el taller.');
   return session;
+}
+function requireManager(session) {
+  if (Number(session.is_manager) !== 1) fail(403, 'Solo el encargado puede administrar las cuentas de técnicos.');
 }
 function clearOldSessions() {
   db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
@@ -213,7 +217,7 @@ async function handleApi(req, res, pathname) {
     const valid = verifyPassword(user, password) && user.active === 1 && user.role === 'mechanic';
     if (!valid) {
       registerFailedLogin(key);
-      return sendJson(res, 401, { error: 'Correo o contraseña incorrectos. Si eres técnico, solicita una cuenta al responsable del servidor.' });
+      return sendJson(res, 401, { error: 'Correo o contraseña incorrectos. Si tienes autorización, solicita una cuenta al encargado del taller.' });
     }
     loginAttempts.delete(key);
     const token = randomBytes(32).toString('hex');
@@ -234,6 +238,41 @@ async function handleApi(req, res, pathname) {
 
   const session = requireMechanic(req);
   if (req.method !== 'GET') validateOrigin(req);
+
+  if (pathname === '/api/admin/users' && req.method === 'GET') {
+    requireManager(session);
+    return sendJson(res, 200, { users: listMechanics() });
+  }
+
+  if (pathname === '/api/admin/users' && req.method === 'POST') {
+    requireManager(session);
+    const body = await readJson(req);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'Los datos de la cuenta no son válidos.');
+    let created;
+    try {
+      created = createMechanic({ email: body.email, displayName: body.display_name, password: body.password });
+    } catch (error) {
+      if (String(error.message).includes('UNIQUE constraint failed: users.email')) fail(409, 'Ya existe una cuenta con ese correo.');
+      if (['Escribe un correo electrónico válido.', 'El nombre debe tener entre 2 y 100 caracteres.', 'La contraseña debe tener entre 12 y 200 caracteres.'].includes(error.message)) fail(400, error.message);
+      throw error;
+    }
+    return sendJson(res, 201, { user: { ...created, active: 1, created_at: nowIso() } });
+  }
+
+  const adminUserMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+  if (adminUserMatch && req.method === 'PATCH') {
+    requireManager(session);
+    const body = await readJson(req);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'Los datos de la cuenta no son válidos.');
+    if (typeof body.active !== 'boolean') fail(400, 'Indica si la cuenta debe quedar activa o desactivada.');
+    const id = decodeURIComponent(adminUserMatch[1]);
+    try { setMechanicActive(id, body.active); }
+    catch (error) {
+      if (error.message === 'No se encontró una cuenta de técnico mecánico administrable.') fail(404, error.message);
+      throw error;
+    }
+    return sendJson(res, 200, { ok: true });
+  }
 
   if (pathname === '/api/data' && req.method === 'GET') return sendJson(res, 200, listData());
 
@@ -399,7 +438,7 @@ server.listen(port, host, () => {
     }
   }
   console.log(`Base de datos local: ${path.join(dataDir, 'taller-control.sqlite')}`);
-  console.log('Solo las cuentas provisionadas de técnicos mecánicos pueden consultar los datos.');
+  console.log('Solo las cuentas autorizadas de encargado y técnicos pueden consultar los datos.');
   if (process.env.TALLER_NO_OPEN_BROWSER !== '1') {
     console.log('Abriendo la pantalla de acceso en este equipo…');
     openLocalBrowser(`http://localhost:${port}`);

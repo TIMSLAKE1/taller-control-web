@@ -4,7 +4,7 @@
 
 - Validar en celular y computadora la recepción, borradores, inspección, fotos, cambios de estado, PDF, aprobación interna, gastos, filtros y exportación CSV.
 - Añadir pruebas automatizadas y corregir los errores que aparezcan; el proyecto aún no tiene una suite completa de pruebas.
-- Confirmar que las cuentas creadas correspondan únicamente a técnicos mecánicos autorizados y que cada persona use su propia contraseña.
+- Confirmar que exista un solo encargado inicial, que las demás cuentas correspondan únicamente a técnicos autorizados y que cada persona use su propia contraseña.
 
 ## 2. Respaldar y recuperar SQLite
 

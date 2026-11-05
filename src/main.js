@@ -30,6 +30,7 @@ const CATEGORIES = ['Refacciones', 'Insumos', 'Servicios externos', 'Herramienta
 let user = null;
 let orders = [];
 let expenses = [];
+let authorizedUsers = [];
 let teamMembers = [];
 let localTeamName = 'Equipo de taller';
 let activeOrderId = null;
@@ -165,15 +166,17 @@ function notify(message) {
 }
 function setProfile() {
   const name = serverMode && user ? (user.display_name || user.email) : localMode && !publicDemoBuild ? localTeamName : 'Equipo de taller';
-  const role = serverMode ? (user ? 'Técnico mecánico · SQLite local' : 'Sesión cerrada') : publicDemoBuild ? 'Demo ficticia' : 'Prueba limpia · este dispositivo';
+  const role = serverMode ? (user ? `${user.role === 'manager' ? 'Encargado' : 'Técnico mecánico'} · SQLite local` : 'Sesión cerrada') : publicDemoBuild ? 'Demo ficticia' : 'Prueba limpia · este dispositivo';
   const nameEl = $('.profile-name');
   const roleEl = $('.profile-role');
   if (nameEl) nameEl.textContent = name;
   if (roleEl) roleEl.textContent = role;
   const teamButton = $('#openTeamBtn');
   if (teamButton) {
-    teamButton.disabled = !localMode || publicDemoBuild;
-    teamButton.title = teamButton.disabled ? 'La administración local de equipo no está disponible en este modo.' : 'Administrar equipo local';
+    const canManageUsers = serverMode && user?.role === 'manager';
+    const canManageLocalTeam = localMode && !publicDemoBuild;
+    teamButton.disabled = !canManageUsers && !canManageLocalTeam;
+    teamButton.title = canManageUsers ? 'Administrar cuentas autorizadas del taller' : canManageLocalTeam ? 'Administrar sugerencias locales de equipo' : 'La administración solo está disponible para el encargado del taller.';
   }
   renderTeamUi();
   const bottom = $('.side-bottom');
@@ -305,7 +308,7 @@ function showAuth(mode) {
   }
   backdrop.setAttribute('role', 'dialog');
   backdrop.setAttribute('aria-modal', 'true');
-  backdrop.innerHTML = `<section class="auth-panel"><div class="eyebrow"><span class="dot"></span>Acceso al taller · red local</div><h2>Iniciar sesión</h2><p class="intro">Acceso reservado a técnicos mecánicos con cuenta autorizada. No hay registro abierto; si eres técnico, solicita una cuenta al responsable del servidor.</p><form id="localAuthForm"><div class="field"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" autocomplete="username" required /></div><div class="field"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" autocomplete="current-password" required /></div><div class="auth-actions"><button class="btn" id="authSubmit" type="submit">Entrar</button></div><div id="authMessage" class="auth-error" role="status" aria-live="polite"></div></form></section>`;
+  backdrop.innerHTML = `<section class="auth-panel"><div class="eyebrow"><span class="dot"></span>Acceso al taller · red local</div><h2>Iniciar sesión</h2><p class="intro">Acceso reservado al encargado y a técnicos con cuenta autorizada. No hay registro abierto; solicita acceso al encargado del taller.</p><form id="localAuthForm"><div class="field"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" autocomplete="username" required /></div><div class="field"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" autocomplete="current-password" required /></div><div class="auth-actions"><button class="btn" id="authSubmit" type="submit">Entrar</button></div><div id="authMessage" class="auth-error" role="status" aria-live="polite"></div></form></section>`;
   $('#localAuthForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const message = $('#authMessage');
@@ -371,7 +374,84 @@ function setupTeamUi() {
     technician.insertAdjacentHTML('afterend', '<datalist id="teamMemberSuggestions"></datalist>');
   }
   if (!$('#teamModal')) document.body.insertAdjacentHTML('beforeend', `<div class="modal-backdrop" id="teamModal"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="teamModalTitle"><div class="modal-head"><h2 id="teamModalTitle">Equipo local</h2><button class="icon-btn" type="button" id="closeTeamModal" aria-label="Cerrar">×</button></div><p>Organiza a las personas que trabajan en el taller y úsalas como sugerencias al asignar un responsable.</p><form id="teamNameForm"><div class="field"><label for="teamNameInput">Nombre del taller o equipo</label><input id="teamNameInput" maxlength="80" required /></div><div class="modal-actions"><button class="btn btn-light" type="submit">Guardar nombre</button></div></form><form id="teamMemberForm" style="margin-top:15px;padding-top:14px;border-top:1px solid var(--line)"><div class="field-grid"><div class="field"><label for="teamMemberName">Nombre del integrante</label><input id="teamMemberName" maxlength="100" required placeholder="Nombre" /></div><div class="field"><label for="teamMemberRole">Función (opcional)</label><input id="teamMemberRole" maxlength="80" placeholder="Ej. Técnico automotriz" /></div></div><div class="modal-actions"><button class="btn btn-teal" type="submit">Agregar al equipo</button></div></form><div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px"><strong style="font-size:10px">Integrantes</strong><span id="teamMemberCount" class="badge gray">0 integrantes</span></div><div id="teamMembersList" style="max-height:190px;overflow:auto;margin-top:8px"></div><div class="callout" style="margin-top:12px"><strong>Solo en este dispositivo:</strong> esta lista no crea cuentas, no controla permisos y no se sincroniza. Los nombres quedan en este navegador; puedes seguir escribiendo cualquier responsable directamente en Recepción.</div></div></div>`);
+  setupAuthorizedUsersUi();
   renderTeamUi();
+}
+
+function setupAuthorizedUsersUi() {
+  if ($('#userAdminModal')) return;
+  document.body.insertAdjacentHTML('beforeend', `<div class="modal-backdrop" id="userAdminModal"><div class="modal user-admin-modal" role="dialog" aria-modal="true" aria-labelledby="userAdminTitle"><div class="modal-head"><h2 id="userAdminTitle">Usuarios autorizados</h2><button class="icon-btn" type="button" id="closeUserAdmin" aria-label="Cerrar">×</button></div><p>Agrega técnicos con una cuenta propia o desactiva su acceso. No hay registro público ni se envían invitaciones.</p><form id="authorizedUserForm"><div class="field-grid"><div class="field"><label for="authorizedUserName">Nombre del técnico</label><input id="authorizedUserName" maxlength="100" autocomplete="name" required /></div><div class="field"><label for="authorizedUserEmail">Correo electrónico</label><input id="authorizedUserEmail" type="email" maxlength="254" autocomplete="username" required /></div><div class="field"><label for="authorizedUserPassword">Contraseña inicial</label><input id="authorizedUserPassword" type="password" minlength="12" maxlength="200" autocomplete="new-password" required /><span class="hint">Al menos 12 caracteres.</span></div><div class="field"><label for="authorizedUserPasswordAgain">Confirmar contraseña</label><input id="authorizedUserPasswordAgain" type="password" minlength="12" maxlength="200" autocomplete="new-password" required /></div></div><div class="modal-actions"><button class="btn btn-teal" id="addAuthorizedUserBtn" type="submit">Agregar técnico</button></div><div id="userAdminMessage" class="auth-error" role="status" aria-live="polite"></div></form><div class="user-admin-list-head"><strong>Técnicos</strong><span id="authorizedUserCount" class="badge gray">0 cuentas</span></div><div id="authorizedUsersList" class="user-admin-list"></div><div class="callout" style="margin-top:12px"><strong>Control de acceso:</strong> entrega la contraseña inicial al técnico por un canal privado. Al desactivarlo se revocan sus sesiones; sus registros históricos se conservan.</div></div></div>`);
+}
+
+function renderAuthorizedUsers() {
+  const list = $('#authorizedUsersList');
+  const count = $('#authorizedUserCount');
+  if (count) count.textContent = `${authorizedUsers.length} cuenta${authorizedUsers.length === 1 ? '' : 's'}`;
+  if (!list) return;
+  list.innerHTML = authorizedUsers.length ? authorizedUsers.map((person) => {
+    const active = Number(person.active) === 1;
+    return `<div class="authorized-user-row"><div class="authorized-user-details"><strong>${escapeHtml(person.display_name)}</strong><span>${escapeHtml(person.email)}</span><small>Creada ${escapeHtml(fmtDate(person.created_at, { dateStyle: 'medium' }))}</small></div><span class="badge ${active ? 'green' : 'gray'}">${active ? 'Activa' : 'Desactivada'}</span><button class="text-btn" type="button" data-toggle-user-active="${escapeHtml(person.id)}" data-next-active="${active ? 'false' : 'true'}">${active ? 'Desactivar' : 'Reactivar'}</button></div>`;
+  }).join('') : '<div class="empty-state">Aún no hay técnicos agregados. Las cuentas nuevas podrán iniciar sesión cuando las compartas con ellos.</div>';
+}
+
+async function refreshAuthorizedUsers() {
+  const result = await serverRequest('/api/admin/users');
+  authorizedUsers = Array.isArray(result.users) ? result.users : [];
+  renderAuthorizedUsers();
+}
+
+async function openUserAdminModal() {
+  if (!serverMode || user?.role !== 'manager') return;
+  $('#userAdminModal').classList.add('open');
+  $('#userAdminMessage').className = 'auth-success';
+  $('#userAdminMessage').textContent = 'Cargando cuentas…';
+  try {
+    await refreshAuthorizedUsers();
+    $('#userAdminMessage').textContent = '';
+  } catch (error) {
+    $('#userAdminMessage').className = 'auth-error';
+    $('#userAdminMessage').textContent = error.message;
+  }
+}
+
+function closeUserAdminModal() { $('#userAdminModal')?.classList.remove('open'); }
+
+async function addAuthorizedUser(event) {
+  event.preventDefault();
+  if (user?.role !== 'manager') return;
+  const password = $('#authorizedUserPassword').value;
+  const confirmation = $('#authorizedUserPasswordAgain').value;
+  const message = $('#userAdminMessage');
+  if (password !== confirmation) {
+    message.className = 'auth-error'; message.textContent = 'Las contraseñas no coinciden.'; return;
+  }
+  const button = $('#addAuthorizedUserBtn');
+  button.disabled = true;
+  message.className = 'auth-success'; message.textContent = 'Creando cuenta…';
+  try {
+    await serverRequest('/api/admin/users', { method: 'POST', body: {
+      display_name: $('#authorizedUserName').value.trim(),
+      email: $('#authorizedUserEmail').value.trim(), password
+    } });
+    $('#authorizedUserForm').reset();
+    await refreshAuthorizedUsers();
+    message.className = 'auth-success'; message.textContent = 'Cuenta creada. Comparte la contraseña inicial con el técnico por un canal privado.';
+  } catch (error) {
+    message.className = 'auth-error'; message.textContent = error.message;
+  } finally { button.disabled = false; }
+}
+
+async function toggleAuthorizedUser(id, nextActive) {
+  const person = authorizedUsers.find((item) => item.id === id);
+  if (!person || user?.role !== 'manager') return;
+  if (!nextActive && !window.confirm(`¿Desactivar el acceso de ${person.display_name}? Se cerrarán sus sesiones y se conservarán sus registros.`)) return;
+  try {
+    await serverRequest(`/api/admin/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: { active: nextActive } });
+    await refreshAuthorizedUsers();
+    notify(nextActive ? 'Cuenta de técnico reactivada.' : 'Cuenta desactivada y sesiones revocadas.');
+  } catch (error) {
+    $('#userAdminMessage').className = 'auth-error'; $('#userAdminMessage').textContent = error.message;
+  }
 }
 
 function renderTeamUi() {
@@ -914,11 +994,21 @@ async function recordDecision(approved) {
 
 function registerEvents() {
   document.addEventListener('click', handleNavigation);
-  $('#openTeamBtn')?.addEventListener('click', openTeamModal);
+  $('#openTeamBtn')?.addEventListener('click', () => {
+    if (serverMode && user?.role === 'manager') openUserAdminModal();
+    else openTeamModal();
+  });
   $('#closeTeamModal')?.addEventListener('click', closeTeamModal);
   $('#teamModal')?.addEventListener('click', (event) => { if (event.target === $('#teamModal')) closeTeamModal(); });
   $('#teamNameForm')?.addEventListener('submit', saveTeamName);
   $('#teamMemberForm')?.addEventListener('submit', saveTeamMember);
+  $('#closeUserAdmin')?.addEventListener('click', closeUserAdminModal);
+  $('#userAdminModal')?.addEventListener('click', (event) => { if (event.target === $('#userAdminModal')) closeUserAdminModal(); });
+  $('#authorizedUserForm')?.addEventListener('submit', addAuthorizedUser);
+  $('#authorizedUsersList')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-toggle-user-active]');
+    if (button) toggleAuthorizedUser(button.dataset.toggleUserActive, button.dataset.nextActive === 'true');
+  });
   $('#teamMembersList')?.addEventListener('click', (event) => {
     const remove = event.target.closest('[data-remove-team-member]');
     if (remove) removeTeamMember(remove.dataset.removeTeamMember);
@@ -993,7 +1083,7 @@ function registerEvents() {
     }
   });
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') { $('#modalBackdrop')?.classList.remove('open'); $('#expenseModal')?.classList.remove('open'); closeTeamModal(); $('#sidebar')?.classList.remove('open'); }
+    if (event.key === 'Escape') { $('#modalBackdrop')?.classList.remove('open'); $('#expenseModal')?.classList.remove('open'); closeTeamModal(); closeUserAdminModal(); $('#sidebar')?.classList.remove('open'); }
   });
   window.addEventListener('online', () => { if (localMode) setConnection('Modo local', 'local'); });
   window.addEventListener('offline', () => setConnection('Sin conexión', 'offline'));

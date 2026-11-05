@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline';
-import { createMechanic, deactivateMechanic, closeDatabase } from './db.js';
+import { createInitialManager, closeDatabase } from './db.js';
 
 function option(name) {
   const index = process.argv.indexOf(`--${name}`);
@@ -39,31 +39,24 @@ function askSecret(prompt) {
 }
 
 async function main() {
-  if (process.argv[2] === 'disable') {
-    const email = option('email') || await ask('Correo del técnico que dejará de tener acceso: ');
-    deactivateMechanic(email);
-    console.log(`Cuenta desactivada y sesiones revocadas: ${email.trim().toLowerCase()}.`);
-    return;
-  }
-  if (process.argv[2] !== 'add') {
-    console.log('Uso:');
-    console.log('  npm run user:add -- --email correo --name "Nombre"');
-    console.log('  npm run user:disable -- --email correo');
-    console.log('Las cuentas son de mecánicos y no hay registro desde la web.');
+  if (process.argv[2] !== 'init-manager') {
+    console.log('Uso: npm run manager:init');
+    console.log('Crea una sola vez al encargado inicial si todavía no existe.');
     process.exitCode = 2;
     return;
   }
-  const email = option('email') || await ask('Correo del técnico: ');
-  const displayName = option('name') || await ask('Nombre del técnico: ');
+  const email = option('email') || await ask('Correo del encargado: ');
+  const displayName = option('name') || await ask('Nombre del encargado: ');
   const password = await askSecret('Contraseña nueva (12 caracteres mínimo): ');
   const confirmation = await askSecret('Repite la contraseña: ');
   if (password !== confirmation) throw new Error('Las contraseñas no coinciden.');
-  const user = createMechanic({ email, displayName, password });
-  console.log(`Cuenta creada para ${user.display_name} (${user.email}). Rol asignado: técnico mecánico.`);
+  const user = createInitialManager({ email, displayName, password });
+  console.log(`Encargado inicial creado para ${user.display_name} (${user.email}).`);
+  console.log('Después del primer acceso, agrega y desactiva técnicos desde la administración de usuarios en la app.');
 }
 
 main().catch((error) => {
-  console.error(`No se pudo crear la cuenta: ${error.message}`);
+  console.error(`No se pudo crear el encargado inicial: ${error.message}`);
   process.exitCode = 1;
 }).finally(() => {
   try { closeDatabase(); } catch {}

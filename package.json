@@ -14,8 +14,8 @@
     "preview": "vite preview --host 0.0.0.0",
     "local": "npm run build && node server/index.js",
     "serve": "node server/index.js",
-    "user:add": "node server/users.js add",
-    "user:disable": "node server/users.js disable"
+    "manager:init": "node server/users.js init-manager",
+    "test": "node --test"
   },
   "devDependencies": {
     "vite": "^6.0.0"
