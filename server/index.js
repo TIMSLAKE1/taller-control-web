@@ -174,8 +174,15 @@ function validateOrder(order, pathId) {
 }
 function listData() {
   const orders = db.prepare('SELECT data_json FROM service_orders ORDER BY received_at DESC LIMIT 2000').all().map(parseOrder);
-  const expenses = db.prepare(`SELECT id, expense_date, category, description, amount, service_order_id, created_at
-    FROM shop_expenses ORDER BY expense_date DESC LIMIT 2000`).all();
+  const expenseRows = db.prepare(`SELECT e.id, e.expense_date, e.category, e.description, e.amount, e.service_order_id, e.created_at,
+      f.id AS proof_id, f.original_name AS proof_name, f.media_type AS proof_type, f.size AS proof_size, f.created_at AS proof_created_at
+    FROM shop_expenses e LEFT JOIN expense_evidence_files f ON f.expense_id = e.id
+    ORDER BY e.expense_date DESC LIMIT 2000`).all();
+  const expenses = expenseRows.map((row) => ({
+    id: row.id, expense_date: row.expense_date, category: row.category, description: row.description,
+    amount: row.amount, service_order_id: row.service_order_id, created_at: row.created_at,
+    proof: row.proof_id ? { photoId: row.proof_id, name: row.proof_name, type: row.proof_type, size: row.proof_size, created_at: row.proof_created_at } : null
+  }));
   return { orders, expenses };
 }
 function mimeType(filePath) {
@@ -333,10 +340,53 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 201, { expense });
   }
 
+  const expenseProofUploadMatch = pathname.match(/^\/api\/expenses\/([^/]+)\/proof$/);
+  if (expenseProofUploadMatch && req.method === 'POST') {
+    const expenseId = decodeURIComponent(expenseProofUploadMatch[1]);
+    if (!db.prepare('SELECT 1 AS ok FROM shop_expenses WHERE id = ?').get(expenseId)) fail(404, 'Registra el gasto antes de adjuntar el comprobante.');
+    if (db.prepare('SELECT 1 AS ok FROM expense_evidence_files WHERE expense_id = ?').get(expenseId)) fail(409, 'Este gasto ya tiene una imagen; elimina el comprobante anterior antes de reemplazarlo.');
+    const mediaType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (!allowedImageTypes.has(mediaType)) fail(415, 'Tipo de imagen no admitido. Usa JPEG, PNG, WebP, GIF, AVIF o HEIC.');
+    const bytes = await readBody(req, maxPhotoBytes);
+    if (!bytes.length) fail(400, 'El archivo está vacío.');
+    if (!imageBytesMatch(bytes, mediaType)) fail(415, 'El contenido del archivo no coincide con su formato de imagen.');
+    const proof = { id: randomUUID(), expense_id: expenseId, original_name: safeName(req.headers['x-file-name']), media_type: mediaType, size: bytes.length, created_at: nowIso() };
+    const filePath = path.join(evidenceDir, `${proof.id}.blob`);
+    writeFileSync(filePath, bytes, { flag: 'wx', mode: 0o600 });
+    try {
+      db.prepare(`INSERT INTO expense_evidence_files (id,expense_id,original_name,media_type,size,created_at)
+        VALUES (@id,@expense_id,@original_name,@media_type,@size,@created_at)`).run(proof);
+    } catch (error) { try { unlinkSync(filePath); } catch {} throw error; }
+    return sendJson(res, 201, { proof: { photoId: proof.id, name: proof.original_name, type: proof.media_type, size: proof.size, created_at: proof.created_at } });
+  }
+
+  const expenseProofDeleteMatch = pathname.match(/^\/api\/expenses\/([^/]+)\/proof$/);
+  if (expenseProofDeleteMatch && req.method === 'DELETE') {
+    const expenseId = decodeURIComponent(expenseProofDeleteMatch[1]);
+    const proof = db.prepare('SELECT id FROM expense_evidence_files WHERE expense_id = ?').get(expenseId);
+    if (!proof) fail(404, 'Este gasto no tiene una imagen adjunta.');
+    db.prepare('DELETE FROM expense_evidence_files WHERE id = ?').run(proof.id);
+    try { unlinkSync(path.join(evidenceDir, `${proof.id}.blob`)); } catch {}
+    return sendJson(res, 200, { ok: true });
+  }
+
+  const expenseProofGetMatch = pathname.match(/^\/api\/expense-proofs\/([^/]+)$/);
+  if (expenseProofGetMatch && req.method === 'GET') {
+    const proofId = decodeURIComponent(expenseProofGetMatch[1]);
+    const proof = db.prepare('SELECT media_type,size FROM expense_evidence_files WHERE id = ?').get(proofId);
+    if (!proof) fail(404, 'No se encontró la imagen del gasto.');
+    let file;
+    try { file = readFileSync(path.join(evidenceDir, `${proofId}.blob`)); } catch { fail(404, 'No se encontró el archivo de imagen.'); }
+    res.writeHead(200, { 'Content-Type': proof.media_type, 'Content-Length': file.length, 'Cache-Control': 'private, no-store', ...securityHeaders });
+    return res.end(file);
+  }
+
   const expenseMatch = pathname.match(/^\/api\/expenses\/([^/]+)$/);
   if (expenseMatch && req.method === 'DELETE') {
     const id = decodeURIComponent(expenseMatch[1]);
+    const proof = db.prepare('SELECT id FROM expense_evidence_files WHERE expense_id = ?').get(id);
     db.prepare('DELETE FROM shop_expenses WHERE id = ?').run(id);
+    if (proof) { try { unlinkSync(path.join(evidenceDir, `${proof.id}.blob`)); } catch {} }
     return sendJson(res, 200, { ok: true });
   }
 

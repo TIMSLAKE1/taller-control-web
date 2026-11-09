@@ -69,6 +69,6 @@ Esta instalación está diseñada para funcionar en la red privada del taller. E
 - Recepción, edición y borradores de órdenes.
 - Inspección de kilometraje, combustible, condición, fluidos, accesorios, documentos, objetos declarados y fotos.
 - Búsqueda, filtros, cambios de estado, vista imprimible/PDF y exportación CSV.
-- Registro interno de solicitud y respuesta de aprobación; no envía mensajes ni crea una firma electrónica.
-- Registro de gastos reales del taller, resumen por periodo, asociación opcional a una orden y exportación CSV.
+- Aprobación sin cargos de servicios externos: prepara un borrador de correo (`mailto`), abre WhatsApp con texto prellenado (`wa.me`) o copia el texto para un portal/otro canal. El taller revisa y envía manualmente; la app registra la solicitud, el resultado, fecha y nota de respuesta en SQLite local. No usa APIs de envío ni crea una firma electrónica.
+- Registro de gastos reales del taller, resumen por periodo, asociación opcional a una orden, exportación CSV e imagen opcional de factura/justificante guardada localmente.
 - PWA instalable; el service worker solo almacena recursos públicos de la interfaz y nunca guarda en caché respuestas de la API ni fotos privadas.

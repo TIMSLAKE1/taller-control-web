@@ -58,6 +58,14 @@ db.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS shop_expenses_date_idx ON shop_expenses(expense_date DESC);
+  CREATE TABLE IF NOT EXISTS expense_evidence_files (
+    id TEXT PRIMARY KEY,
+    expense_id TEXT NOT NULL UNIQUE REFERENCES shop_expenses(id) ON DELETE CASCADE,
+    original_name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS service_order_events (
     id TEXT PRIMARY KEY,
     service_order_id TEXT NOT NULL REFERENCES service_orders(id) ON DELETE CASCADE,

@@ -2,8 +2,8 @@
 
 ## 1. Probar los flujos operativos
 
-- Validar en celular y computadora la recepción, borradores, inspección, fotos, cambios de estado, PDF, aprobación interna, gastos, filtros y exportación CSV.
-- Añadir pruebas automatizadas y corregir los errores que aparezcan; el proyecto aún no tiene una suite completa de pruebas.
+- Validar en celular y computadora la recepción, borradores, inspección, fotos, cambios de estado, PDF, aprobación, gastos, filtros y exportación CSV. En aprobación, confirmar que correo/WhatsApp solo preparan el mensaje, que el envío exige una acción manual y que fechas y respuestas quedan guardadas en SQLite local. En gastos, validar la carga, consulta y eliminación de la imagen del justificante.
+- La suite automatizada cubre generación de borradores y reglas clave, pero no toda la interfaz; ampliar pruebas según se validen dispositivos reales.
 - Confirmar que exista un solo encargado inicial, que las demás cuentas correspondan únicamente a técnicos autorizados y que cada persona use su propia contraseña.
 
 ## 2. Respaldar y recuperar SQLite
@@ -20,7 +20,7 @@
 
 ## 4. Acordar el alcance operativo pendiente
 
-- La aprobación del cliente sigue siendo un registro interno; la app no envía WhatsApp/correo ni obtiene una firma electrónica. Definir canal, proveedor, consentimiento, requisitos legales y cualquier costo antes de integrar comunicaciones.
+- El correo (`mailto`), WhatsApp (`wa.me`) y portal/otro se preparan sin APIs ni cargos; el envío y la revisión del mensaje son manuales. Acordar el canal con el cliente y validar la política de privacidad del taller. El registro de respuesta es interno y no constituye una firma electrónica ni determina validez legal.
 - La aplicación no se configura para iniciar automáticamente ni para alojarse permanentemente. Si más adelante se requiere arranque automático, definir primero responsable, mantenimiento, respaldo y controles de acceso del equipo.
 
 ## Límites deliberados de esta versión

@@ -56,3 +56,18 @@ test('migra la tabla anterior, permite un solo encargado inicial y revoca sesion
   setMechanicActive(mechanic.id, true);
   assert.equal(listMechanics().find((person) => person.id === mechanic.id).active, 1);
 });
+
+test('los comprobantes de gastos quedan asociados y se eliminan en cascada', () => {
+  const db = getDatabase();
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM shop_expenses').get().count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM expense_evidence_files').get().count, 0);
+  const createdAt = nowIso();
+  db.prepare(`INSERT INTO shop_expenses (id,expense_date,category,description,amount,service_order_id,created_by,created_at)
+    VALUES (?,?,?,?,?,NULL,NULL,?)`).run('expense-proof-test', '2026-11-08', 'Otro', 'Prueba temporal de evidencia', 1, createdAt);
+  db.prepare(`INSERT INTO expense_evidence_files (id,expense_id,original_name,media_type,size,created_at)
+    VALUES (?,?,?,?,?,?)`).run('expense-proof-file-test', 'expense-proof-test', 'factura.png', 'image/png', 64, createdAt);
+  assert.equal(db.prepare('SELECT expense_id FROM expense_evidence_files WHERE id = ?').get('expense-proof-file-test').expense_id, 'expense-proof-test');
+  db.prepare('DELETE FROM shop_expenses WHERE id = ?').run('expense-proof-test');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM shop_expenses').get().count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM expense_evidence_files').get().count, 0);
+});

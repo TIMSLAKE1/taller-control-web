@@ -1,3 +1,5 @@
+import { buildApprovalMessage, buildEmailDraftUrl, buildWhatsAppDraftUrl } from './approval.js';
+
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const escapeHtml = (value = '') => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -27,6 +29,8 @@ const STATUSES = ['Borrador', 'Inspección', 'Aprobación', 'En servicio', 'Comp
 const REASONS = ['Mantenimiento', 'Reparación', 'Diagnóstico'];
 const FLUID_NAMES = ['Aceite de motor', 'Refrigerante', 'Líquido de frenos', 'Dirección hidráulica', 'Limpiaparabrisas', 'Transmisión'];
 const CATEGORIES = ['Refacciones', 'Insumos', 'Servicios externos', 'Herramientas', 'Operación', 'Otro'];
+const MAX_EXPENSE_PROOF_BYTES = 10 * 1024 * 1024;
+const EXPENSE_PROOF_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif', 'image/heic', 'image/heif']);
 let user = null;
 let orders = [];
 let expenses = [];
@@ -41,6 +45,8 @@ let refreshTimer = null;
 let installPrompt = null;
 let photoDbPromise = null;
 let photoUrls = [];
+let expenseProofPreviewUrl = null;
+let expenseProofTargetId = null;
 
 function demoOrder() {
   const id = 'demo-os-0001';
@@ -267,10 +273,35 @@ const backend = {
     const result = await serverRequest('/api/expenses', { method: 'POST', body: expense });
     expenses.unshift(result.expense); return result.expense;
   },
+  async uploadExpenseProof(expense, file) {
+    if (file.size > MAX_EXPENSE_PROOF_BYTES) throw new Error('La imagen debe pesar 10 MB o menos.');
+    if (!EXPENSE_PROOF_TYPES.has(file.type)) throw new Error('Usa una imagen JPEG, PNG, WebP, GIF, AVIF o HEIC.');
+    if (localMode) {
+      const localKey = `${STORAGE_PREFIX}:expense:${expense.id}:${uuid()}`;
+      await putLocalPhoto(localKey, file);
+      expense.proof = { name: file.name, localKey, created_at: nowIso(), size: file.size, type: file.type };
+      writeLocal(LOCAL_EXPENSES_KEY, expenses);
+    } else {
+      const result = await serverRequest(`/api/expenses/${encodeURIComponent(expense.id)}/proof`, { method: 'POST', body: file });
+      expense.proof = result.proof;
+    }
+    return expense.proof;
+  },
+  async removeExpenseProof(expense) {
+    if (!expense?.proof) return;
+    if (localMode && expense.proof.localKey) await deleteLocalPhoto(expense.proof.localKey);
+    else if (expense.proof.photoId) await serverRequest(`/api/expenses/${encodeURIComponent(expense.id)}/proof`, { method: 'DELETE' });
+    expense.proof = null;
+    if (localMode) writeLocal(LOCAL_EXPENSES_KEY, expenses);
+  },
   async deleteExpense(id) {
-    if (localMode) { expenses = expenses.filter((expense) => expense.id !== id); writeLocal(LOCAL_EXPENSES_KEY, expenses); return; }
+    const expense = expenses.find((item) => item.id === id);
+    if (localMode) {
+      if (expense?.proof?.localKey) await deleteLocalPhoto(expense.proof.localKey);
+      expenses = expenses.filter((item) => item.id !== id); writeLocal(LOCAL_EXPENSES_KEY, expenses); return;
+    }
     await serverRequest(`/api/expenses/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    expenses = expenses.filter((expense) => expense.id !== id);
+    expenses = expenses.filter((item) => item.id !== id);
   },
   async logEvent(order, eventType, details = {}) {
     if (localMode) return;
@@ -350,7 +381,7 @@ function addExtraUi() {
     const banner = $('#view-home .demo-banner');
     if (banner) banner.insertAdjacentHTML('afterend', '<button type="button" class="demo-reset" id="resetTestBtn">Reiniciar la prueba y borrar lo capturado</button>');
   }
-  if (!$('#expenseModal')) document.body.insertAdjacentHTML('beforeend', `<div class="modal-backdrop" id="expenseModal"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="expenseTitle"><div class="modal-head"><h2 id="expenseTitle">Registrar gasto real</h2><button class="icon-btn" type="button" id="closeExpense" aria-label="Cerrar">×</button></div><form id="expenseForm"><div class="field-grid"><div class="field"><label for="expenseDate">Fecha</label><input id="expenseDate" type="date" required /></div><div class="field"><label for="expenseCategory">Rubro</label><select id="expenseCategory" required>${CATEGORIES.map((category) => `<option>${escapeHtml(category)}</option>`).join('')}</select></div><div class="field full"><label for="expenseDescription">Descripción</label><input id="expenseDescription" maxlength="160" required placeholder="Ej. Compra de refacciones" /></div><div class="field"><label for="expenseAmount">Importe (MXN)</label><input id="expenseAmount" type="number" min="0.01" step="0.01" inputmode="decimal" required /></div><div class="field"><label for="expenseOrder">Orden relacionada</label><select id="expenseOrder"><option value="">Sin orden</option></select></div></div><div class="modal-actions"><button class="btn btn-light" type="button" id="cancelExpense">Cancelar</button><button class="btn btn-teal" type="submit">Guardar gasto</button></div></form></div></div>`);
+  if (!$('#expenseModal')) document.body.insertAdjacentHTML('beforeend', `<div class="modal-backdrop" id="expenseModal"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="expenseTitle"><div class="modal-head"><h2 id="expenseTitle">Registrar gasto real</h2><button class="icon-btn" type="button" id="closeExpense" aria-label="Cerrar">×</button></div><form id="expenseForm"><div class="field-grid"><div class="field"><label for="expenseDate">Fecha</label><input id="expenseDate" type="date" required /></div><div class="field"><label for="expenseCategory">Rubro</label><select id="expenseCategory" required>${CATEGORIES.map((category) => `<option>${escapeHtml(category)}</option>`).join('')}</select></div><div class="field full"><label for="expenseDescription">Descripción</label><input id="expenseDescription" maxlength="160" required placeholder="Ej. Compra de refacciones" /></div><div class="field"><label for="expenseAmount">Importe (MXN)</label><input id="expenseAmount" type="number" min="0.01" step="0.01" inputmode="decimal" required /></div><div class="field"><label for="expenseOrder">Orden relacionada</label><select id="expenseOrder"><option value="">Sin orden</option></select></div><div class="field full"><label for="expenseProof">Imagen de factura o justificante (opcional)</label><input id="expenseProof" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif,image/heic,image/heif" /><div class="hint">Una imagen de hasta 10 MB. Se guarda localmente junto con el gasto; no se envía a servicios externos.</div><div class="expense-proof-preview" id="expenseProofPreview" hidden></div></div></div><div class="modal-actions"><button class="btn btn-light" type="button" id="cancelExpense">Cancelar</button><button class="btn btn-teal" type="submit">Guardar gasto</button></div></form></div></div>`);
 }
 
 function setupTeamUi() {
@@ -511,7 +542,7 @@ function showView(key) {
 }
 function clearForm() {
   activeOrderId = null;
-  ['custName','custPhone','custCity','custAddress','custNotes','plate','vin','make','model','year','color','vehicleNotes','failure','reportedIssue','odometer','physicalNotes','valuables','workScope','estimateTotal'].forEach((id) => { const el = $(`#${id}`); if (el) el.value = ''; });
+  ['custName','custPhone','custEmail','custCity','custAddress','custNotes','plate','vin','make','model','year','color','vehicleNotes','failure','reportedIssue','odometer','physicalNotes','valuables','workScope','estimateTotal'].forEach((id) => { const el = $(`#${id}`); if (el) el.value = ''; });
   $('#receivedAt').value = localDateTime();
   $('#reason').value = 'Seleccionar motivo';
   $('#technician').value = '';
@@ -524,7 +555,7 @@ function fillForm(order) {
   if (!order) { clearForm(); return; }
   activeOrderId = order.id;
   const fields = {
-    custName: order.customer?.name, custPhone: order.customer?.phone, custCity: order.customer?.city, custAddress: order.customer?.address,
+    custName: order.customer?.name, custPhone: order.customer?.phone, custEmail: order.customer?.email, custCity: order.customer?.city, custAddress: order.customer?.address,
     custNotes: order.customer?.notes, plate: order.vehicle?.plate, vin: order.vehicle?.vin, make: order.vehicle?.make, model: order.vehicle?.model,
     year: order.vehicle?.year, color: order.vehicle?.color, vehicleNotes: order.vehicle?.notes, failure: order.failure_summary,
     reportedIssue: order.reported_issue, odometer: order.odometer, physicalNotes: order.physical_notes,
@@ -557,7 +588,7 @@ function readForm(previous = {}) {
   return {
     ...previous,
     id: previous.id || uuid(), order_number: previous.order_number || nextOrderNumber(), is_demo: Boolean(previous.is_demo),
-    customer: { name: $('#custName').value.trim(), phone: $('#custPhone').value.trim(), city: $('#custCity').value.trim(), address: $('#custAddress').value.trim(), notes: $('#custNotes').value.trim() },
+    customer: { name: $('#custName').value.trim(), phone: $('#custPhone').value.trim(), email: $('#custEmail').value.trim(), city: $('#custCity').value.trim(), address: $('#custAddress').value.trim(), notes: $('#custNotes').value.trim() },
     vehicle: { plate: $('#plate').value.trim().toUpperCase(), vin: $('#vin').value.trim(), make: $('#make').value.trim(), model: $('#model').value.trim(), year: $('#year').value.trim(), color: $('#color').value.trim(), notes: $('#vehicleNotes').value.trim() },
     received_at: received, reason: $('#reason').value, technician: $('#technician').value.trim(),
     failure_summary: $('#failure').value.trim(), reported_issue: $('#reportedIssue').value.trim(),
@@ -737,6 +768,32 @@ async function changeOrderStatus(id, status) {
   }
 }
 
+function updateApprovalChannelActions() {
+  const button = $('#prepareApprovalChannel');
+  const recordButton = $('#recordApprovalRequest');
+  if (!button || !recordButton) return;
+  const order = orderById(approvalOrderId);
+  const channel = collectChannel();
+  button.disabled = !order || !channel;
+  recordButton.disabled = !order || !channel;
+  const hint = $('#approvalShareHint');
+  if (!channel) {
+    button.textContent = 'Preparar mensaje';
+    if (hint) hint.textContent = 'Selecciona un canal. Preparar un mensaje no lo envía ni registra que ya se compartió.';
+    return;
+  }
+  if (channel === 'Correo electrónico') {
+    button.textContent = 'Abrir borrador de correo';
+    if (hint) hint.textContent = order?.customer?.email ? `Se abrirá un borrador dirigido a ${order.customer.email}. Revísalo y pulsa Enviar en tu aplicación de correo.` : 'Agrega un correo válido en Recepción para preparar el borrador. No se enviará automáticamente.';
+  } else if (channel === 'WhatsApp (comunicación)') {
+    button.textContent = 'Abrir WhatsApp';
+    if (hint) hint.textContent = 'Se abrirá WhatsApp con el texto prellenado. Revisa la conversación y pulsa Enviar allí; la app no manda mensajes.';
+  } else {
+    button.textContent = 'Copiar texto para portal / otro';
+    if (hint) hint.textContent = 'Copia el texto y pégalo manualmente en el portal o canal acordado.';
+  }
+}
+
 function renderApprovalSummary() {
   const order = orderById(approvalOrderId);
   if (!order) {
@@ -749,35 +806,46 @@ function renderApprovalSummary() {
     const state = $('#view-approval .approval-state');
     if (state) {
       state.querySelector('strong').textContent = 'No hay una orden para revisar';
-      state.querySelector('span:not(.big-icon)').textContent = 'Cuando exista una orden, aquí podrás registrar la solicitud y la respuesta recibida.';
+      state.querySelector('span:not(.big-icon)').textContent = 'Cuando exista una orden, aquí podrás preparar un mensaje sin costo y registrar la respuesta recibida.';
     }
-    if ($('#simulateApproval')) $('#simulateApproval').disabled = true;
+    if ($('#approvalNote')) $('#approvalNote').value = '';
+    if ($('#approvalResponseNote')) $('#approvalResponseNote').value = '';
+    $$('input[name="channel"]').forEach((input) => { input.checked = false; });
+    updateApprovalChannelActions();
     return;
   }
-  if ($('#simulateApproval')) $('#simulateApproval').disabled = false;
-  const eyebrow = $('#view-approval .eyebrow');
-  if (eyebrow) eyebrow.innerHTML = `<span class="dot"></span>${escapeHtml(orderNumber(order))} · Paso 4 de 4`;
+  const requestedAt = order.approval_requested_at || null;
+  const respondedAt = order.approval_responded_at || (['approved', 'changes_requested'].includes(order.approval_status) ? order.approval_recorded_at : null);
+  const contact = order.approval_channel === 'Correo electrónico' ? (order.customer?.email || 'Sin correo') : order.approval_channel === 'WhatsApp (comunicación)' ? (order.customer?.phone || 'Sin teléfono') : 'Registro manual';
   const summary = $('#view-approval .summary-list');
   if (summary) summary.innerHTML = [
     ['Folio', orderNumber(order)], ['Cliente', order.customer?.name || 'Sin nombre'], ['Vehículo', `${orderTitle(order)} · ${order.vehicle?.year || '—'}`],
-    ['Trabajo', order.reason || 'Sin motivo'], ['Canal', order.approval_channel || 'Por acordar'], ['Proveedor de firma', order.signature_provider || 'No definido']
+    ['Trabajo', order.work_scope || order.reason || 'Sin definir'], ['Estimación', money(order.estimate_total)], ['Canal', order.approval_channel || 'Por acordar'],
+    ['Contacto', contact], ['Solicitud compartida', requestedAt ? fmtDate(requestedAt) : '—'], ['Respuesta recibida', respondedAt ? fmtDate(respondedAt) : '—'],
+    ...(order.approval_response_note ? [['Detalle de respuesta', order.approval_response_note]] : [])
   ].map(([a, b]) => `<div class="summary-row"><span>${escapeHtml(a)}</span><b>${escapeHtml(b)}</b></div>`).join('');
   const status = $('#approvalPreviewStatus');
   if (status) {
     status.textContent = approvalLabel(order);
     status.className = `badge ${order.approval_status === 'approved' ? 'green' : order.approval_status === 'changes_requested' ? 'coral' : order.approval_status === 'pending' ? 'amber' : 'gray'}`;
   }
-  if ($('#signatureProvider')) $('#signatureProvider').value = order.signature_provider || 'Por definir con el cliente';
-  $('#approvalNote').value = order.approval_note || '';
-  $$('input[name="channel"]').forEach((input) => { input.checked = input.parentElement.textContent.trim() === order.approval_channel; });
+  if ($('#approvalNote')) $('#approvalNote').value = order.approval_note || '';
+  if ($('#approvalResponseNote')) $('#approvalResponseNote').value = order.approval_response_note || '';
+  $$('input[name="channel"]').forEach((input) => { input.checked = input.value === order.approval_channel; });
   const state = $('#view-approval .approval-state');
   if (state) {
-    const titles = { not_requested: 'Sin solicitud registrada', pending: 'Solicitud registrada en el taller', approved: 'Aprobación registrada internamente', changes_requested: 'Cambios registrados' };
-    const copies = { not_requested: 'Selecciona el canal y guarda la solicitud cuando la hayas compartido por fuera.', pending: 'El taller puede registrar aquí la respuesta recibida.', approved: 'No se capturó firma electrónica ni se envió comunicación.', changes_requested: 'Actualiza el alcance y vuelve a solicitar autorización.' };
+    const titles = { not_requested: 'Sin solicitud compartida', pending: 'Esperando respuesta del cliente', approved: 'Aprobación registrada', changes_requested: 'Cambios registrados' };
+    const copies = {
+      not_requested: 'Selecciona un canal para preparar el mensaje. Enviar y registrar que se compartió son pasos manuales.',
+      pending: `Solicitud registrada${requestedAt ? ` el ${fmtDate(requestedAt)}` : ''}. Cuando recibas respuesta por fuera de la app, regístrala aquí.`,
+      approved: `Respuesta de aprobación registrada${respondedAt ? ` el ${fmtDate(respondedAt)}` : ''}. Esto no constituye una firma electrónica ni prueba de identidad.`,
+      changes_requested: `Cambios solicitados${respondedAt ? ` el ${fmtDate(respondedAt)}` : ''}. Revisa la propuesta antes de volver a compartirla.`
+    };
     state.querySelector('strong').textContent = titles[order.approval_status] || titles.not_requested;
     state.querySelector('span:not(.big-icon)').textContent = copies[order.approval_status] || copies.not_requested;
   }
-  if (!$('#approvalDisclaimer')) $('#view-approval .approval-grid .approval-card').insertAdjacentHTML('beforeend', '<div id="approvalDisclaimer" class="approval-disclaimer">Registro interno del taller. No envía mensajes, no firma por el cliente y no sustituye asesoría sobre validez legal.</div>');
+  updateApprovalChannelActions();
+  if (!$('#approvalDisclaimer')) $('#view-approval .approval-grid .approval-card').insertAdjacentHTML('beforeend', '<div id="approvalDisclaimer" class="approval-disclaimer">Registro interno del taller. No se envían mensajes automáticamente ni se crea una firma electrónica.</div>');
 }
 function renderAll() {
   renderDashboard(); renderOrders(); renderExpenses();
@@ -823,7 +891,7 @@ async function openPdfOrder(id) {
   const line = (a, b) => `<div class="pdf-line"><span>${escapeHtml(a)}</span><b>${escapeHtml(b || 'Sin capturar')}</b></div>`;
   const fluidText = Object.entries(order.inspection?.fluids || {}).map(([name, value]) => `${name}: ${value}`).join(' · ') || 'Pendiente';
   const inv = order.inventory || {};
-  $('.pdf-paper').innerHTML = `<div class="pdf-top"><div><div class="pdf-brand">Taller Control</div><div class="pdf-sub">Recepción de vehículo · ${serverMode ? 'servidor SQLite del taller' : 'registro local'}</div></div><div class="pdf-folio"><strong>${escapeHtml(orderNumber(order))}</strong><span>${escapeHtml(fmtDate(order.received_at))}</span></div></div><h2 class="pdf-title">Orden de recepción y servicio</h2><div class="pdf-intro">Registro de la información proporcionada al ingreso y condición documentada del vehículo.</div><div class="preview-checks" style="margin-top:12px"><span class="badge ${order.is_demo ? 'amber' : 'green'}">${order.is_demo ? 'Prueba ficticia' : 'Registro guardado'}</span><span class="badge ${statusClass(order.status)}">${escapeHtml(order.status)}</span><span class="badge blue">Evidencia ${(order.evidence || []).length} fotos</span></div><div class="pdf-grid"><section class="pdf-box"><h3>Cliente</h3>${line('Nombre', order.customer?.name)}${line('Teléfono', order.customer?.phone)}${line('Dirección', order.customer?.address)}${line('Ciudad', order.customer?.city)}${line('Observaciones', order.customer?.notes)}</section><section class="pdf-box"><h3>Vehículo</h3>${line('Marca / modelo', orderTitle(order))}${line('Año / color', `${order.vehicle?.year || ''} · ${order.vehicle?.color || ''}`)}${line('Placas', order.vehicle?.plate)}${line('VIN', order.vehicle?.vin)}${line('Observaciones', order.vehicle?.notes)}</section><section class="pdf-box"><h3>Ingreso y lecturas</h3>${line('Motivo', order.reason)}${line('Técnico', order.technician || 'Por asignar')}${line('Kilometraje', order.odometer ? `${Number(order.odometer).toLocaleString('es-MX')} km` : '')}${line('Combustible', order.fuel_level)}</section><section class="pdf-box"><h3>Falla y condición física</h3>${line('Falla según cliente', order.reported_issue || order.failure_summary)}${line('Daños / observaciones', order.physical_notes)}</section></div><div class="pdf-notes"><b>Fluidos:</b> ${escapeHtml(fluidText)}</div><div class="pdf-notes"><b>Accesorios:</b> ${escapeHtml((inv.accessories || []).join(', ') || 'Ninguno marcado')}<br><b>Documentos:</b> ${escapeHtml((inv.documents || []).join(', ') || 'Ninguno marcado')}<br><b>Objetos declarados:</b> ${escapeHtml(inv.valuables || 'Sin declarar')}<br><b>Trabajo propuesto:</b> ${escapeHtml(order.work_scope || 'Sin definir')}<br><b>Estimación:</b> ${escapeHtml(money(order.estimate_total))}</div>${evidenceMarkup ? `<div class="print-evidence">${evidenceMarkup}</div>` : '<div class="pdf-notes"><b>Evidencia fotográfica:</b> No se adjuntaron fotografías.</div>'}<div class="pdf-signatures"><div class="signature">Entrega del vehículo · nombre y firma</div><div class="signature">Recepción en taller · nombre y firma</div></div><div class="pdf-disclaimer">Formato de control interno. Las firmas impresas requieren firma manuscrita; el registro digital no representa una firma electrónica ni una aprobación del cliente.</div>`;
+  $('.pdf-paper').innerHTML = `<div class="pdf-top"><div><div class="pdf-brand">Taller Control</div><div class="pdf-sub">Recepción de vehículo · ${serverMode ? 'servidor SQLite del taller' : 'registro local'}</div></div><div class="pdf-folio"><strong>${escapeHtml(orderNumber(order))}</strong><span>${escapeHtml(fmtDate(order.received_at))}</span></div></div><h2 class="pdf-title">Orden de recepción y servicio</h2><div class="pdf-intro">Registro de la información proporcionada al ingreso y condición documentada del vehículo.</div><div class="preview-checks" style="margin-top:12px"><span class="badge ${order.is_demo ? 'amber' : 'green'}">${order.is_demo ? 'Prueba ficticia' : 'Registro guardado'}</span><span class="badge ${statusClass(order.status)}">${escapeHtml(order.status)}</span><span class="badge blue">Evidencia ${(order.evidence || []).length} fotos</span></div><div class="pdf-grid"><section class="pdf-box"><h3>Cliente</h3>${line('Nombre', order.customer?.name)}${line('Teléfono', order.customer?.phone)}${line('Correo electrónico', order.customer?.email)}${line('Dirección', order.customer?.address)}${line('Ciudad', order.customer?.city)}${line('Observaciones', order.customer?.notes)}</section><section class="pdf-box"><h3>Vehículo</h3>${line('Marca / modelo', orderTitle(order))}${line('Año / color', `${order.vehicle?.year || ''} · ${order.vehicle?.color || ''}`)}${line('Placas', order.vehicle?.plate)}${line('VIN', order.vehicle?.vin)}${line('Observaciones', order.vehicle?.notes)}</section><section class="pdf-box"><h3>Ingreso y lecturas</h3>${line('Motivo', order.reason)}${line('Técnico', order.technician || 'Por asignar')}${line('Kilometraje', order.odometer ? `${Number(order.odometer).toLocaleString('es-MX')} km` : '')}${line('Combustible', order.fuel_level)}</section><section class="pdf-box"><h3>Falla y condición física</h3>${line('Falla según cliente', order.reported_issue || order.failure_summary)}${line('Daños / observaciones', order.physical_notes)}</section></div><div class="pdf-notes"><b>Fluidos:</b> ${escapeHtml(fluidText)}</div><div class="pdf-notes"><b>Accesorios:</b> ${escapeHtml((inv.accessories || []).join(', ') || 'Ninguno marcado')}<br><b>Documentos:</b> ${escapeHtml((inv.documents || []).join(', ') || 'Ninguno marcado')}<br><b>Objetos declarados:</b> ${escapeHtml(inv.valuables || 'Sin declarar')}<br><b>Trabajo propuesto:</b> ${escapeHtml(order.work_scope || 'Sin definir')}<br><b>Estimación:</b> ${escapeHtml(money(order.estimate_total))}</div>${evidenceMarkup ? `<div class="print-evidence">${evidenceMarkup}</div>` : '<div class="pdf-notes"><b>Evidencia fotográfica:</b> No se adjuntaron fotografías.</div>'}<div class="pdf-signatures"><div class="signature">Entrega del vehículo · nombre y firma</div><div class="signature">Recepción en taller · nombre y firma</div></div><div class="pdf-disclaimer">Formato de control interno. Las firmas impresas requieren firma manuscrita; el registro digital no representa una firma electrónica ni una aprobación del cliente.</div>`;
   $('#orderList').style.display = 'none'; $('#printArea').style.display = 'block';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -885,7 +953,8 @@ function renderExpenses() {
   if (!body) return;
   body.innerHTML = expenses.map((expense) => {
     const linked = orders.find((order) => order.id === expense.service_order_id);
-    return `<tr><td>${escapeHtml(expense.expense_date)}</td><td>${escapeHtml(expense.description)}</td><td>${escapeHtml(expense.category)}</td><td>${escapeHtml(linked ? orderNumber(linked) : '—')}</td><td class="expense-amount">${escapeHtml(money(expense.amount))}</td><td><button class="order-click" data-delete-expense="${escapeHtml(expense.id)}">Eliminar</button></td></tr>`;
+    const proofCell = expense.proof ? `<button class="order-click" data-view-expense-proof="${escapeHtml(expense.id)}">Ver imagen</button><button class="order-click" data-remove-expense-proof="${escapeHtml(expense.id)}">Quitar</button>` : `<button class="order-click" data-add-expense-proof="${escapeHtml(expense.id)}">Adjuntar imagen</button>`;
+    return `<tr><td>${escapeHtml(expense.expense_date)}</td><td>${escapeHtml(expense.description)}</td><td>${escapeHtml(expense.category)}</td><td>${escapeHtml(linked ? orderNumber(linked) : '—')}</td><td>${proofCell}</td><td class="expense-amount">${escapeHtml(money(expense.amount))}</td><td><button class="order-click" data-delete-expense="${escapeHtml(expense.id)}">Eliminar</button></td></tr>`;
   }).join('');
   if (empty) empty.hidden = expenses.length > 0;
   const orderSelect = $('#expenseOrder');
@@ -895,21 +964,70 @@ function renderExpenses() {
     if (orders.some((order) => order.id === value)) orderSelect.value = value;
   }
 }
+function updateExpenseProofPreview() {
+  const preview = $('#expenseProofPreview');
+  const input = $('#expenseProof');
+  if (expenseProofPreviewUrl) { URL.revokeObjectURL(expenseProofPreviewUrl); expenseProofPreviewUrl = null; }
+  if (!preview || !input) return;
+  const file = input.files?.[0];
+  if (!file) { preview.hidden = true; preview.innerHTML = ''; return; }
+  if (!EXPENSE_PROOF_TYPES.has(file.type)) { input.value = ''; preview.hidden = true; notify('Selecciona una imagen JPEG, PNG, WebP, GIF, AVIF o HEIC.'); return; }
+  if (file.size > MAX_EXPENSE_PROOF_BYTES) { input.value = ''; preview.hidden = true; notify('La imagen debe pesar 10 MB o menos.'); return; }
+  expenseProofPreviewUrl = URL.createObjectURL(file);
+  preview.innerHTML = `<img src="${escapeHtml(expenseProofPreviewUrl)}" alt="Vista previa del comprobante"><span>${escapeHtml(file.name)} · ${(file.size / 1024 / 1024).toFixed(2)} MB</span>`;
+  preview.hidden = false;
+}
+async function openExpenseProof(id) {
+  const expense = expenses.find((item) => item.id === id);
+  if (!expense?.proof) { notify('Este gasto no tiene una imagen adjunta.'); return; }
+  let url = '';
+  if (expense.proof.localKey) {
+    const blob = await getLocalPhoto(expense.proof.localKey);
+    if (blob) url = URL.createObjectURL(blob);
+  } else if (expense.proof.photoId && serverMode) url = `/api/expense-proofs/${encodeURIComponent(expense.proof.photoId)}`;
+  if (!url) { notify('No se encontró la imagen guardada.'); return; }
+  window.open(url, '_blank', 'noopener,noreferrer');
+  notify('Imagen del comprobante abierta en otra pestaña.');
+}
+async function attachExpenseProof(file) {
+  const expense = expenses.find((item) => item.id === expenseProofTargetId);
+  expenseProofTargetId = null;
+  if (!file || !expense) return;
+  try {
+    await backend.uploadExpenseProof(expense, file);
+    renderExpenses(); notify('Imagen del justificante adjuntada al gasto.');
+  } catch (error) { notify(`No se pudo adjuntar la imagen: ${error.message}`); }
+}
 function openExpenseModal() {
-  $('#expenseDate').value = new Date().toISOString().slice(0, 10);
   $('#expenseForm').reset(); $('#expenseDate').value = new Date().toISOString().slice(0, 10);
+  updateExpenseProofPreview();
   $('#expenseModal').classList.add('open'); $('#expenseDescription').focus();
 }
-function closeExpenseModal() { $('#expenseModal').classList.remove('open'); }
+function closeExpenseModal() {
+  $('#expenseModal').classList.remove('open');
+  if ($('#expenseProof')) $('#expenseProof').value = '';
+  updateExpenseProofPreview();
+}
 async function saveExpense(event) {
   event.preventDefault();
+  const proofFile = $('#expenseProof').files?.[0] || null;
   const expense = {
     id: uuid(), expense_date: $('#expenseDate').value, category: $('#expenseCategory').value,
     description: $('#expenseDescription').value.trim(), amount: Number($('#expenseAmount').value), service_order_id: $('#expenseOrder').value || null
   };
   if (!expense.description || expense.amount <= 0) { notify('Captura descripción e importe mayor que cero.'); return; }
-  try { await backend.saveExpense(expense); renderExpenses(); closeExpenseModal(); notify('Gasto registrado.'); }
-  catch (error) { notify(`No se pudo registrar: ${error.message}`); }
+  try {
+    const savedExpense = await backend.saveExpense(expense);
+    if (proofFile) {
+      try { await backend.uploadExpenseProof(savedExpense, proofFile); }
+      catch (error) {
+        try { await backend.deleteExpense(savedExpense.id); }
+        catch { renderExpenses(); closeExpenseModal(); notify(`El gasto se guardó, pero no se pudo guardar la imagen ni deshacer el gasto: ${error.message}`); return; }
+        notify(`No se guardó el gasto porque falló la imagen: ${error.message}`); return;
+      }
+    }
+    renderExpenses(); closeExpenseModal(); notify(proofFile ? 'Gasto e imagen del justificante guardados.' : 'Gasto registrado.');
+  } catch (error) { notify(`No se pudo registrar: ${error.message}`); }
 }
 
 function csvCell(value) { return `"${String(value ?? '').replace(/"/g, '""')}"`; }
@@ -951,37 +1069,77 @@ async function reviewOrder() {
   if (order) { showView('orders'); openPdfOrder(order.id); }
 }
 
-function collectChannel() { return $('input[name="channel"]:checked')?.parentElement.textContent.trim() || ''; }
+function collectChannel() { return $('input[name="channel"]:checked')?.value || ''; }
+async function prepareApprovalChannel() {
+  const order = orderById(approvalOrderId);
+  if (!order) { notify('Selecciona una orden para preparar el mensaje.'); return; }
+  const channel = collectChannel();
+  if (!channel) { notify('Selecciona el canal acordado con el cliente.'); return; }
+  if (channel === 'Correo electrónico') {
+    const url = buildEmailDraftUrl(order);
+    if (!url) { notify('Agrega un correo electrónico válido en Recepción y vuelve a intentarlo.'); return; }
+    window.location.assign(url);
+    notify('Borrador abierto; revísalo y pulsa Enviar en tu aplicación de correo.');
+    return;
+  }
+  if (channel === 'WhatsApp (comunicación)') {
+    const url = buildWhatsAppDraftUrl(order);
+    if (!url) { notify('Captura el teléfono del cliente con prefijo internacional, por ejemplo +52 55 1234 5678.'); return; }
+    window.open(url, '_blank', 'noopener,noreferrer');
+    notify('WhatsApp abierto con texto prellenado. Revisa el mensaje y pulsa Enviar allí.');
+    return;
+  }
+  const message = buildApprovalMessage(order);
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(message);
+    else {
+      const area = document.createElement('textarea');
+      area.value = message; area.setAttribute('readonly', '');
+      area.style.position = 'fixed'; area.style.opacity = '0';
+      document.body.append(area); area.select();
+      const copied = document.execCommand('copy'); area.remove();
+      if (!copied) throw new Error('El navegador no permitió copiar el texto.');
+    }
+    notify('Texto copiado. Pégalo y compártelo manualmente en el canal acordado.');
+  } catch {
+    notify('No se pudo copiar el texto. Revisa los datos de la orden e inténtalo de nuevo.');
+  }
+}
 async function openApprovalRequest() {
   const order = orderById(approvalOrderId);
   if (!order) { notify('No hay una orden para seleccionar.'); return; }
   const channel = collectChannel();
   if (!channel) { notify('Selecciona el canal acordado con el cliente.'); return; }
+  if (!window.confirm('Confirma que ya compartiste manualmente la propuesta. Esta acción solo registra la solicitud en el taller; no enviará ningún mensaje.')) return;
   order.approval_status = 'pending'; order.approval_channel = channel;
-  order.signature_provider = $('#signatureProvider').value.includes('Por definir') ? '' : $('#signatureProvider').value;
-  order.approval_note = $('#approvalNote').value.trim(); order.approval_recorded_at = nowIso(); order.status = 'Aprobación';
+  order.approval_note = $('#approvalNote').value.trim();
+  order.approval_requested_at = nowIso(); order.approval_recorded_at = order.approval_requested_at;
+  order.approval_responded_at = null; order.approval_response_note = '';
+  order.status = 'Aprobación';
   try {
-    await backend.saveOrder(order); await backend.logEvent(order, 'approval_request_recorded', { channel, provider: order.signature_provider });
+    await backend.saveOrder(order); await backend.logEvent(order, 'approval_request_recorded', { channel, note: order.approval_note });
     renderAll(); renderApprovalSummary();
-    $('#modalTitle').textContent = 'Solicitud registrada internamente';
-    $('#modalText').textContent = 'Se guardó el registro para esta orden. No se envió correo ni WhatsApp y no se generó una firma electrónica.';
-    $('#clientOrderSummary').innerHTML = `<strong>${escapeHtml(orderNumber(order))} · ${escapeHtml(orderTitle(order))}</strong><br>${escapeHtml(order.customer?.name || '')}<br>Canal acordado: ${escapeHtml(channel)}<br>Estado: Pendiente de respuesta`;
-    $('#approveDemo').textContent = 'Registrar aprobación recibida'; $('#requestChangesDemo').textContent = 'Registrar cambios solicitados';
+    $('#approvalResponseNote').value = '';
+    $('#modalTitle').textContent = 'Registrar respuesta del cliente';
+    $('#modalText').textContent = 'La solicitud quedó registrada en el taller. Cuando recibas respuesta fuera de la app, anótala aquí.';
+    $('#clientOrderSummary').innerHTML = `<strong>${escapeHtml(orderNumber(order))} · ${escapeHtml(orderTitle(order))}</strong><br>${escapeHtml(order.customer?.name || '')}<br>Canal compartido: ${escapeHtml(channel)}<br>Estado: Pendiente de respuesta`;
+    $('#recordApproved').textContent = 'Registrar aprobación recibida'; $('#recordChanges').textContent = 'Registrar cambios recibidos';
     $('#modalBackdrop').classList.add('open');
   } catch (error) { notify(`No se pudo registrar: ${error.message}`); }
 }
 async function recordDecision(approved) {
   const order = orderById(approvalOrderId);
-  if (!order) return;
+  if (!order || order.approval_status !== 'pending') { notify('No hay una solicitud pendiente para actualizar.'); return; }
   order.approval_status = approved ? 'approved' : 'changes_requested';
-  order.approval_recorded_at = nowIso();
+  order.approval_responded_at = nowIso(); order.approval_recorded_at = order.approval_responded_at;
+  order.approval_response_note = $('#approvalResponseNote').value.trim();
   order.status = approved ? 'En servicio' : 'Aprobación';
   try {
     await backend.saveOrder(order);
-    await backend.logEvent(order, approved ? 'approval_recorded' : 'changes_recorded', { channel: order.approval_channel, note: order.approval_note });
+    await backend.logEvent(order, approved ? 'approval_recorded' : 'changes_recorded', { channel: order.approval_channel, request_note: order.approval_note, response_note: order.approval_response_note });
     renderAll(); renderApprovalSummary();
-    $('#modalText').textContent = approved ? 'Se registró internamente una aprobación recibida. Esto no constituye una firma electrónica ni prueba de identidad.' : 'Se registró internamente que el cliente pidió cambios. Actualiza la propuesta antes de iniciar el servicio.';
-    notify(approved ? 'Aprobación registrada en el expediente.' : 'Solicitud de cambios registrada.');
+    $('#modalText').textContent = approved ? 'Se registró internamente que el cliente aprobó. Esto no constituye una firma electrónica ni prueba de identidad.' : 'Se registró internamente que el cliente pidió cambios. Revisa la propuesta antes de volver a compartirla.';
+    notify(approved ? 'Respuesta de aprobación registrada en la orden.' : 'Solicitud de cambios registrada en la orden.');
     setTimeout(() => $('#modalBackdrop').classList.remove('open'), 1200);
   } catch (error) { notify(`No se pudo registrar la respuesta: ${error.message}`); }
 }
@@ -1025,28 +1183,49 @@ function registerEvents() {
   ['orderSearch', 'stateFilter', 'reasonFilter'].forEach((id) => $(`#${id}`)?.addEventListener('input', filterOrders));
   $('#approvalOrder')?.addEventListener('change', () => { approvalOrderId = $('#approvalOrder').value; renderApprovalSummary(); });
   $('#toApprovalBtn')?.addEventListener('click', () => { approvalOrderId = printOrderId || activeOrderId; renderApprovalSummary(); showView('approval'); });
-  $('#simulateApproval')?.addEventListener('click', openApprovalRequest);
-  $('#approveDemo')?.addEventListener('click', () => recordDecision(true));
-  $('#requestChangesDemo')?.addEventListener('click', () => recordDecision(false));
+  $('#prepareApprovalChannel')?.addEventListener('click', prepareApprovalChannel);
+  $('#recordApprovalRequest')?.addEventListener('click', openApprovalRequest);
+  $$('input[name="channel"]').forEach((input) => input.addEventListener('change', updateApprovalChannelActions));
+  $('#recordApproved')?.addEventListener('click', () => recordDecision(true));
+  $('#recordChanges')?.addEventListener('click', () => recordDecision(false));
   $('#closeModal')?.addEventListener('click', () => $('#modalBackdrop').classList.remove('open'));
   $('#modalBackdrop')?.addEventListener('click', (event) => { if (event.target === $('#modalBackdrop')) $('#modalBackdrop').classList.remove('open'); });
   $('#addExpenseBtn')?.addEventListener('click', openExpenseModal);
   $('#expenseForm')?.addEventListener('submit', saveExpense);
+  $('#expenseProof')?.addEventListener('change', updateExpenseProofPreview);
+  $('#expenseProofQuickInput')?.addEventListener('change', (event) => attachExpenseProof(event.target.files?.[0] || null));
+  $('#expensesBody')?.addEventListener('click', async (event) => {
+    const add = event.target.closest('[data-add-expense-proof]');
+    if (add) { expenseProofTargetId = add.dataset.addExpenseProof; $('#expenseProofQuickInput').value = ''; $('#expenseProofQuickInput').click(); return; }
+    const view = event.target.closest('[data-view-expense-proof]');
+    if (view) { await openExpenseProof(view.dataset.viewExpenseProof); return; }
+    const remove = event.target.closest('[data-remove-expense-proof]');
+    if (remove) {
+      const expense = expenses.find((item) => item.id === remove.dataset.removeExpenseProof);
+      if (!expense || !window.confirm('¿Quitar la imagen del justificante de este gasto?')) return;
+      try { await backend.removeExpenseProof(expense); renderExpenses(); notify('Imagen del justificante eliminada.'); }
+      catch (error) { notify(`No se pudo quitar la imagen: ${error.message}`); }
+    }
+  });
   $('#closeExpense')?.addEventListener('click', closeExpenseModal);
   $('#cancelExpense')?.addEventListener('click', closeExpenseModal);
   $('#expenseModal')?.addEventListener('click', (event) => { if (event.target === $('#expenseModal')) closeExpenseModal(); });
   $('#exportOrdersBtn')?.addEventListener('click', exportOrders);
   $('#exportExpensesBtn')?.addEventListener('click', exportExpenses);
-  $('#resetDemoBtn')?.addEventListener('click', () => {
+  $('#resetDemoBtn')?.addEventListener('click', async () => {
     if (!publicDemoBuild) { notify('El restablecimiento solo está disponible en la demo ficticia.'); return; }
     if (!window.confirm('Esto restablecerá solo los datos aislados de esta demo en este navegador. ¿Continuar?')) return;
-    const sample = demoOrder();
-    writeLocal(LOCAL_ORDERS_KEY, [sample]); writeLocal(LOCAL_EXPENSES_KEY, []); orders = [sample]; expenses = []; activeOrderId = null; approvalOrderId = sample.id; renderAll(); notify('Demo ficticia restablecida.');
+    try {
+      const proofKeys = expenses.map((expense) => expense.proof?.localKey).filter(Boolean);
+      await Promise.all(proofKeys.map(deleteLocalPhoto));
+      const sample = demoOrder();
+      writeLocal(LOCAL_ORDERS_KEY, [sample]); writeLocal(LOCAL_EXPENSES_KEY, []); orders = [sample]; expenses = []; activeOrderId = null; approvalOrderId = sample.id; renderAll(); notify('Demo ficticia restablecida.');
+    } catch (error) { notify(`No se pudo restablecer la demo: ${error.message || 'intenta de nuevo.'}`); }
   });
   $('#resetTestBtn')?.addEventListener('click', async () => {
     if (!cleanTestBuild || !window.confirm('Esto borrará las órdenes, gastos, fotos y equipo local creados en esta prueba, sin tocar los datos habituales. ¿Continuar?')) return;
     try {
-      const photoKeys = orders.flatMap((order) => order.evidence || []).map((photo) => photo.localKey).filter(Boolean);
+      const photoKeys = [...orders.flatMap((order) => order.evidence || []).map((photo) => photo.localKey), ...expenses.map((expense) => expense.proof?.localKey)].filter(Boolean);
       await Promise.all(photoKeys.map(deleteLocalPhoto));
       orders = []; expenses = [];
       writeLocal(LOCAL_ORDERS_KEY, orders); writeLocal(LOCAL_EXPENSES_KEY, expenses);
@@ -1093,8 +1272,7 @@ function updateStaticText() {
   const demoNote = $('#view-orders .demo-banner div');
   if (demoNote) demoNote.innerHTML = '<strong>Orden imprimible:</strong> genera una vista del expediente actual. La impresión contiene espacios de firma manuscrita; no es una firma electrónica.';
   const approvalIntro = $('#view-approval .page-sub');
-  if (approvalIntro) approvalIntro.textContent = 'Registra solicitud y respuesta recibida; el sistema no envía mensajes ni firma por el cliente.';
-  $('#simulateApproval').textContent = 'Registrar solicitud interna';
+  if (approvalIntro) approvalIntro.textContent = 'Prepara un borrador de correo o WhatsApp, o copia el texto para otro canal. El envío es manual; aquí registras la solicitud y la respuesta.';
   const ordersFoot = $('#view-orders .table-foot span:first-child');
   if (ordersFoot) ordersFoot.textContent = localMode ? 'Datos locales de este navegador.' : 'Órdenes compartidas en la base SQLite local.';
   const sideNote = $('.side-note p');
