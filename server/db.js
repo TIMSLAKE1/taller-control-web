@@ -58,6 +58,18 @@ db.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS shop_expenses_date_idx ON shop_expenses(expense_date DESC);
+  CREATE TABLE IF NOT EXISTS service_order_payments (
+    id TEXT PRIMARY KEY,
+    service_order_id TEXT NOT NULL REFERENCES service_orders(id) ON DELETE RESTRICT,
+    paid_on TEXT NOT NULL CHECK (length(paid_on) = 10),
+    amount REAL NOT NULL CHECK (amount > 0),
+    method TEXT NOT NULL CHECK (method IN ('Efectivo','Transferencia','Tarjeta','Otro')),
+    reference TEXT NOT NULL DEFAULT '' CHECK (length(reference) <= 160),
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS service_order_payments_order_idx ON service_order_payments(service_order_id, paid_on DESC);
+  CREATE INDEX IF NOT EXISTS service_order_payments_paid_on_idx ON service_order_payments(paid_on DESC);
   CREATE TABLE IF NOT EXISTS expense_evidence_files (
     id TEXT PRIMARY KEY,
     expense_id TEXT NOT NULL UNIQUE REFERENCES shop_expenses(id) ON DELETE CASCADE,

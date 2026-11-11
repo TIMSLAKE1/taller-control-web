@@ -1,12 +1,17 @@
 import { buildApprovalMessage, buildEmailDraftUrl, buildWhatsAppDraftUrl } from './approval.js';
 import { getPrivateEvidence, isSupabaseConfigured, supabaseRequest } from './supabase-backend.js';
 import { normalizeTechnicianNames } from './technician-roster.js';
+import { eligiblePaymentOrders, orderBalance, orderChargeTotal, orderPaidTotal, scheduledDeliveries, summarizeEarnings, validatePaymentBalance } from './finance.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const escapeHtml = (value = '') => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const uuid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const nowIso = () => new Date().toISOString();
+const localDateKey = (value = new Date()) => {
+  const date = new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
 const localDateTime = (value = new Date()) => {
   const date = new Date(value);
   date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
@@ -27,6 +32,7 @@ const hostedMode = serverMode || cloudMode;
 const STORAGE_PREFIX = publicDemoBuild ? 'taller-control.demo' : cleanTestBuild ? 'taller-control.clean-test' : 'taller-control';
 const LOCAL_ORDERS_KEY = `${STORAGE_PREFIX}.orders.v1`;
 const LOCAL_EXPENSES_KEY = `${STORAGE_PREFIX}.expenses.v1`;
+const LOCAL_PAYMENTS_KEY = `${STORAGE_PREFIX}.payments.v1`;
 const LOCAL_TEAM_KEY = `${STORAGE_PREFIX}.team.v1`;
 const LOCAL_TEAM_NAME_KEY = `${STORAGE_PREFIX}.team-name.v1`;
 const STATUSES = ['Borrador', 'Inspección', 'Aprobación', 'En servicio', 'Completa', 'Cancelada'];
@@ -42,6 +48,7 @@ function setOperationLabel() {
 let user = null;
 let orders = [];
 let expenses = [];
+let payments = [];
 let authorizedUsers = [];
 let teamMembers = [];
 let activeTechnicianNames = [];
@@ -57,6 +64,8 @@ let photoDbPromise = null;
 let photoUrls = [];
 let expenseProofPreviewUrl = null;
 let expenseProofTargetId = null;
+let calendarCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+let selectedCalendarDate = localDateKey(new Date());
 
 function demoOrder() {
   const id = 'demo-os-0001';
@@ -263,6 +272,8 @@ const backend = {
       if (!publicDemoBuild) orders = orders.filter((order) => !order.is_demo && !String(order.id || '').startsWith('demo-'));
       writeLocal(LOCAL_ORDERS_KEY, orders);
       expenses = readLocal(LOCAL_EXPENSES_KEY, []);
+      payments = readLocal(LOCAL_PAYMENTS_KEY, []);
+      if (!Array.isArray(payments)) payments = [];
       teamMembers = readLocal(LOCAL_TEAM_KEY, []);
       if (!Array.isArray(teamMembers)) teamMembers = [];
       teamMembers = teamMembers.filter((member) => member && typeof member.name === 'string' && member.name.trim()).map((member) => ({ id: member.id || uuid(), name: member.name.trim(), role: String(member.role || '').trim() }));
@@ -302,6 +313,7 @@ const backend = {
     }
     orders = data.orders || [];
     expenses = data.expenses || [];
+    payments = Array.isArray(data.payments) ? data.payments : [];
   },
   async saveOrder(order) {
     order.updated_at = nowIso();
@@ -323,6 +335,17 @@ const backend = {
     }
     const result = await serverRequest('/api/expenses', { method: 'POST', body: expense });
     expenses.unshift(result.expense); return result.expense;
+  },
+  async savePayment(payment) {
+    if (localMode) {
+      const order = orderById(payment.service_order_id);
+      const validationError = validatePaymentBalance(payment, order, payments);
+      if (validationError) throw new Error(validationError);
+      const saved = { ...payment, amount: Number(payment.amount), created_at: nowIso(), created_by: null };
+      payments.unshift(saved); writeLocal(LOCAL_PAYMENTS_KEY, payments); return saved;
+    }
+    const result = await serverRequest('/api/payments', { method: 'POST', body: payment });
+    payments.unshift(result.payment); return result.payment;
   },
   async uploadExpenseProof(expense, file) {
     if (file.size > MAX_EXPENSE_PROOF_BYTES) throw new Error('La imagen debe pesar 10 MB o menos.');
@@ -448,7 +471,7 @@ function setupTeamUi() {
     button.innerHTML = profile.innerHTML;
     profile.replaceWith(button);
   }
-  if (!$('#teamProfileStyles')) document.head.insertAdjacentHTML('beforeend', '<style id="teamProfileStyles">.team-profile{width:100%;border:0;background:transparent;color:inherit;text-align:left;border-radius:12px;cursor:pointer;transition:background .15s}.team-profile:hover:not(:disabled){background:#f6f8f5}.team-profile:disabled{opacity:1;cursor:default}</style>');
+  if (!$('#teamProfileStyles')) document.head.insertAdjacentHTML('beforeend', '<style id="teamProfileStyles">.team-profile{width:100%;border:0;background:transparent;color:inherit;text-align:left;border-radius:12px;cursor:pointer;transition:background .15s}.team-profile:hover:not(:disabled){background:#f2f4f6}.team-profile:disabled{opacity:1;cursor:default}</style>');
   const technician = $('#technician');
   if (cloudMode && technician && technician.tagName !== 'SELECT') {
     const select = document.createElement('select');
@@ -622,7 +645,7 @@ function removeTeamMember(id) {
 function showView(key) {
   $$('.view').forEach((view) => view.classList.toggle('active', view.id === `view-${key}`));
   $$('.nav-btn').forEach((button) => button.classList.toggle('active', button.dataset.view === key));
-  const names = { home: 'Panel general', reception: 'Recepción', inspection: 'Inspección', orders: 'Órdenes de servicio', approval: 'Aprobación del cliente', reports: 'Reportes y gastos' };
+  const names = { home: 'Panel general', reception: 'Recepción', inspection: 'Inspección', orders: 'Órdenes de servicio', approval: 'Aprobación del cliente', reports: 'Reportes y gastos', earnings: 'Cobros y ganancias' };
   if ($('#breadcrumb')) $('#breadcrumb').textContent = names[key] || 'Panel general';
   $('#sidebar')?.classList.remove('open');
   if ($('#orderList')) $('#orderList').style.display = '';
@@ -631,7 +654,7 @@ function showView(key) {
 }
 function clearForm() {
   activeOrderId = null;
-  ['custName','custPhone','custEmail','custCity','custAddress','custNotes','plate','vin','make','model','year','color','vehicleNotes','failure','reportedIssue','odometer','physicalNotes','valuables','workScope','estimateTotal'].forEach((id) => { const el = $(`#${id}`); if (el) el.value = ''; });
+  ['custName','custPhone','custEmail','custCity','custAddress','custNotes','plate','vin','make','model','year','color','vehicleNotes','failure','reportedIssue','odometer','physicalNotes','valuables','workScope','estimateTotal','estimatedReadyAt'].forEach((id) => { const el = $(`#${id}`); if (el) el.value = ''; });
   $('#receivedAt').value = localDateTime();
   $('#reason').value = 'Seleccionar motivo';
   $('#technician').value = '';
@@ -649,7 +672,8 @@ function fillForm(order) {
     custNotes: order.customer?.notes, plate: order.vehicle?.plate, vin: order.vehicle?.vin, make: order.vehicle?.make, model: order.vehicle?.model,
     year: order.vehicle?.year, color: order.vehicle?.color, vehicleNotes: order.vehicle?.notes, failure: order.failure_summary,
     reportedIssue: order.reported_issue, odometer: order.odometer, physicalNotes: order.physical_notes,
-    valuables: order.inventory?.valuables, workScope: order.work_scope, estimateTotal: order.estimate_total
+    valuables: order.inventory?.valuables, workScope: order.work_scope, estimateTotal: order.estimate_total,
+    estimatedReadyAt: order.estimated_ready_at
   };
   Object.entries(fields).forEach(([id, value]) => { const el = $(`#${id}`); if (el) el.value = value ?? ''; });
   $('#receivedAt').value = localDateTime(order.received_at || new Date());
@@ -687,6 +711,7 @@ function readForm(previous = {}) {
     customer: { name: $('#custName').value.trim(), phone: $('#custPhone').value.trim(), email: $('#custEmail').value.trim(), city: $('#custCity').value.trim(), address: $('#custAddress').value.trim(), notes: $('#custNotes').value.trim() },
     vehicle: { plate: $('#plate').value.trim().toUpperCase(), vin: $('#vin').value.trim(), make: $('#make').value.trim(), model: $('#model').value.trim(), year: $('#year').value.trim(), color: $('#color').value.trim(), notes: $('#vehicleNotes').value.trim() },
     received_at: received, reason: $('#reason').value, technician,
+    estimated_ready_at: $('#estimatedReadyAt').value || null,
     failure_summary: $('#failure').value.trim(), reported_issue: $('#reportedIssue').value.trim(),
     odometer: Number(String($('#odometer').value).replace(/[^\d]/g, '')) || null,
     fuel_level: $('.fuel-option.selected')?.textContent.trim() || '', physical_notes: $('#physicalNotes').value.trim(),
@@ -741,7 +766,8 @@ function renderSummary(order) {
       ['Folio', order ? orderNumber(order) : 'Se asigna al guardar'],
       ['Cliente', customer], ['Vehículo', vehicle],
       ['Año / placas', order ? `${order.vehicle?.year || '—'} · ${order.vehicle?.plate || '—'}` : '—'],
-      ['Motivo', order?.reason || 'Por seleccionar'], ['Técnico', order?.technician || 'Por asignar']
+      ['Motivo', order?.reason || 'Por seleccionar'], ['Técnico', order?.technician || 'Por asignar'],
+      ['Entrega estimada', order?.estimated_ready_at ? fmtDate(`${order.estimated_ready_at}T12:00:00`, { dateStyle: 'medium' }) : 'Sin estimar']
     ];
     container.innerHTML = rows.map(([label, value]) => `<div class="summary-row"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join('');
   });
@@ -779,8 +805,8 @@ function renderDashboard() {
     : cleanTestBuild
       ? '<strong>Prueba limpia:</strong> no hay registros precargados. Lo que captures se guarda solo en este navegador, separado de los datos habituales; no usa backend ni genera cargos.'
       : localMode
-      ? '<strong>Modo local sin costo de servidor:</strong> las órdenes y gastos empiezan vacíos y se guardan solo en este navegador. No se sincronizan con otros dispositivos; puedes exportar listas CSV. Las fotos permanecen en este navegador.'
-      : '<strong>Servidor local del taller:</strong> órdenes, gastos y fotos se comparten en la red del taller y se guardan en SQLite. Solo entran técnicos con cuenta autorizada; no requiere Supabase ni servicios de pago.';
+      ? '<strong>Modo local sin costo de servidor:</strong> las órdenes, cobros y gastos empiezan vacíos y se guardan solo en este navegador. No se sincronizan con otros dispositivos; puedes exportar listas CSV. Las fotos permanecen en este navegador.'
+      : '<strong>Servidor local del taller:</strong> órdenes, cobros, gastos y fotos se comparten en la red del taller y se guardan en SQLite. Solo entran técnicos con cuenta autorizada; no requiere Supabase ni servicios de pago.';
   if ($('#resetDemoBtn')) $('#resetDemoBtn').hidden = !publicDemoBuild;
   if ($('#resetTestBtn')) $('#resetTestBtn').hidden = !cleanTestBuild;
   const homeMeta = $('#view-home .dashboard-grid .card-meta');
@@ -798,17 +824,69 @@ function renderDashboard() {
   if (badgeCounts[3]) { badgeCounts[3].textContent = String(pending.length).padStart(2, '0'); badgeCounts[3].classList.toggle('hot', pending.length > 0); }
   const eyebrow = $('#view-orders .eyebrow');
   if (eyebrow) eyebrow.innerHTML = `<span class="dot"></span>Seguimiento · ${orders.length} ${orders.length === 1 ? 'registro' : 'registros'}`;
+  renderUpcomingCalendar();
 }
+
+function renderUpcomingCalendar() {
+  const grid = $('#deliveryCalendarGrid');
+  const label = $('#calendarMonthLabel');
+  if (!grid || !label) return;
+  const year = calendarCursor.getFullYear();
+  const month = calendarCursor.getMonth();
+  label.textContent = new Intl.DateTimeFormat('es-MX', { month: 'long', year: 'numeric' }).format(calendarCursor);
+  const first = new Date(year, month, 1);
+  const last = new Date(year, month + 1, 0);
+  const firstKey = localDateKey(first);
+  const lastKey = localDateKey(last);
+  const monthDeliveries = scheduledDeliveries(orders, firstKey, lastKey);
+  const selectedParts = String(selectedCalendarDate || '').split('-').map(Number);
+  if (selectedParts[0] !== year || selectedParts[1] !== month + 1) {
+    const initialOrder = monthDeliveries.find((order) => order.estimated_ready_at >= localDateKey(new Date())) || monthDeliveries[0];
+    selectedCalendarDate = initialOrder?.estimated_ready_at?.slice(0, 10) || firstKey;
+  }
+  const byDate = new Map();
+  monthDeliveries.forEach((order) => {
+    const key = String(order.estimated_ready_at).slice(0, 10);
+    byDate.set(key, [...(byDate.get(key) || []), order]);
+  });
+  const offset = (first.getDay() + 6) % 7;
+  const cells = Math.ceil((offset + last.getDate()) / 7) * 7;
+  const today = localDateKey(new Date());
+  grid.innerHTML = Array.from({ length: cells }, (_, index) => {
+    const day = index - offset + 1;
+    if (day < 1 || day > last.getDate()) return '<span class="calendar-day blank" aria-hidden="true"></span>';
+    const key = localDateKey(new Date(year, month, day));
+    const count = byDate.get(key)?.length || 0;
+    const classes = ['calendar-day', key === today ? 'today' : '', key === selectedCalendarDate ? 'selected' : '', count ? 'has-deliveries' : '', count && key < today ? 'overdue' : ''].filter(Boolean).join(' ');
+    const dateLabel = new Intl.DateTimeFormat('es-MX', { dateStyle: 'full' }).format(new Date(`${key}T12:00:00`));
+    return `<button type="button" role="gridcell" class="${classes}" data-calendar-day="${key}" aria-label="${escapeHtml(dateLabel)} · ${count} entrega(s)">${day}${count ? `<span class="calendar-count-badge" aria-hidden="true">${count}</span>` : ''}</button>`;
+  }).join('');
+  const selectedOrders = scheduledDeliveries(orders, selectedCalendarDate, selectedCalendarDate);
+  const title = $('#deliveryDayTitle');
+  if (title) title.textContent = fmtDate(`${selectedCalendarDate}T12:00:00`, { dateStyle: 'full' });
+  const countBadge = $('#deliveryDayCount');
+  if (countBadge) { countBadge.textContent = `${selectedOrders.length} entrega${selectedOrders.length === 1 ? '' : 's'}`; countBadge.className = `badge ${selectedOrders.length ? 'blue' : 'gray'}`; }
+  const list = $('#deliveryDayList');
+  if (!list) return;
+  list.innerHTML = selectedOrders.length ? selectedOrders.map((order) => {
+    const overdue = String(order.estimated_ready_at).slice(0, 10) < today;
+    return `<div class="delivery-item ${overdue ? 'overdue' : ''}"><div class="delivery-item-main"><strong>${escapeHtml(orderNumber(order))} · ${escapeHtml(orderTitle(order))}</strong><span>${escapeHtml(order.vehicle?.plate || 'Sin placas')} · ${escapeHtml(order.customer?.name || 'Sin cliente')}</span><small>${escapeHtml(order.technician || 'Técnico sin asignar')} · ${overdue ? 'Fecha estimada vencida' : escapeHtml(order.status)}</small></div><button class="order-click" type="button" data-open-order="${escapeHtml(order.id)}" data-target-view="reception">Abrir →</button></div>`;
+  }).join('') : monthDeliveries.length
+    ? '<div class="calendar-empty">No hay vehículos estimados para este día. Selecciona otra fecha marcada en el calendario.</div>'
+    : '<div class="calendar-empty">No hay próximas entregas para este mes. Al asignar un técnico, captura una fecha estimada en Recepción.</div>';
+}
+
 function renderOrders() {
   const body = $('#ordersTable tbody');
   if (!body) return;
   if (!orders.length) {
-    body.innerHTML = '<tr><td colspan="7" class="empty-state">No hay órdenes. Registra un vehículo para empezar.</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" class="empty-state">No hay órdenes. Registra un vehículo para empezar.</td></tr>';
   } else {
     body.innerHTML = orders.map((order) => `<tr data-status="${escapeHtml(order.status)}" data-reason="${escapeHtml(order.reason)}">
       <td class="primary-cell mono">${escapeHtml(orderNumber(order))}<span class="subcell">${escapeHtml(fmtDate(order.received_at))}</span></td>
       <td>${escapeHtml(order.customer?.name || '')}</td><td>${escapeHtml(orderTitle(order))}<span class="subcell">${escapeHtml(order.vehicle?.year || '—')} · ${escapeHtml(order.vehicle?.plate || '—')}</span></td>
       <td>${escapeHtml(order.reason || '—')}</td><td>${escapeHtml(order.technician || 'Por asignar')}</td>
+      <td>${escapeHtml(order.estimated_ready_at ? fmtDate(`${order.estimated_ready_at}T12:00:00`, { dateStyle: 'medium' }) : '—')}</td>
       <td><select class="status-select" data-order-status="${escapeHtml(order.id)}" aria-label="Estado de ${escapeHtml(orderNumber(order))}">${STATUSES.map((status) => `<option${status === order.status ? ' selected' : ''}>${escapeHtml(status)}</option>`).join('')}</select></td>
       <td><div class="table-action"><button class="order-click show-pdf" data-open-pdf="${escapeHtml(order.id)}">Vista PDF</button><button class="order-click" data-open-order="${escapeHtml(order.id)}" data-target-view="reception">Editar</button></div></td></tr>`).join('');
   }
@@ -944,7 +1022,7 @@ function renderApprovalSummary() {
   if (!$('#approvalDisclaimer')) $('#view-approval .approval-grid .approval-card').insertAdjacentHTML('beforeend', '<div id="approvalDisclaimer" class="approval-disclaimer">Registro interno del taller. No se envían mensajes automáticamente ni se crea una firma electrónica.</div>');
 }
 function renderAll() {
-  renderDashboard(); renderOrders(); renderExpenses();
+  renderDashboard(); renderOrders(); renderExpenses(); renderEarnings();
   const selected = orderById(activeOrderId);
   renderSummary(selected || null);
   if (selected) renderPhotoGrid(selected);
@@ -958,6 +1036,10 @@ function openNextInspection() {
 function handleNavigation(event) {
   const openOrder = event.target.closest('[data-open-order]');
   if (openOrder) { routeOrder(openOrder.dataset.openOrder, openOrder.dataset.targetView || 'inspection'); return; }
+  const calendarDay = event.target.closest('[data-calendar-day]');
+  if (calendarDay) { selectedCalendarDate = calendarDay.dataset.calendarDay; renderUpcomingCalendar(); return; }
+  const recordPayment = event.target.closest('[data-record-payment]');
+  if (recordPayment) { openPaymentModal(recordPayment.dataset.recordPayment); return; }
   const openPdf = event.target.closest('[data-open-pdf]');
   if (openPdf) { showView('orders'); openPdfOrder(openPdf.dataset.openPdf); return; }
   const go = event.target.closest('[data-go]');
@@ -1062,6 +1144,109 @@ function renderExpenses() {
     if (orders.some((order) => order.id === value)) orderSelect.value = value;
   }
 }
+function renderEarnings() {
+  const summary = summarizeEarnings({ orders, payments, expenses });
+  const kpis = $('#earningsKpis');
+  if (kpis) kpis.innerHTML = [
+    ['Cobrado total', summary.totalCollected, `${payments.length} movimiento(s)`, 'var(--teal)', 'var(--teal-soft)'],
+    ['Cobrado este mes', summary.collectedThisMonth, 'Por fecha de recepción', 'var(--blue)', 'var(--blue-soft)'],
+    ['Saldo por cobrar', summary.receivable, 'Órdenes con precio capturado', 'var(--amber)', 'var(--amber-soft)'],
+    ['Neto de caja', summary.cashNet, 'Cobros menos gastos registrados', 'var(--olive)', 'var(--olive-soft)']
+  ].map(([label, value, foot, color, soft]) => `<article class="card earning-kpi" style="--kpi-color:${color};--kpi-soft:${soft}"><div class="kpi-label">${escapeHtml(label)}</div><div class="kpi-value">${escapeHtml(money(value))}</div><div class="kpi-foot">${escapeHtml(foot)}</div></article>`).join('');
+  const receivables = eligiblePaymentOrders(orders).map((order) => {
+    const total = orderChargeTotal(order);
+    const paid = orderPaidTotal(order.id, payments);
+    return { order, total, paid, balance: orderBalance(order, payments), hasTotal: total > 0 };
+  }).filter((item) => item.balance > 0 || !item.hasTotal)
+    .sort((a, b) => String(a.order.estimated_ready_at || '9999-12-31').localeCompare(String(b.order.estimated_ready_at || '9999-12-31')));
+  const receivablesBody = $('#receivablesBody');
+  if (receivablesBody) receivablesBody.innerHTML = receivables.length ? receivables.map(({ order, total, paid, balance, hasTotal }) => `<tr><td class="primary-cell mono">${escapeHtml(orderNumber(order))}<span class="subcell">${escapeHtml(orderTitle(order))} · ${escapeHtml(order.vehicle?.plate || 'Sin placas')}</span></td><td>${escapeHtml(order.customer?.name || '—')}</td><td class="money-cell">${hasTotal ? escapeHtml(money(total)) : 'Por definir'}</td><td class="money-cell paid-cell">${escapeHtml(money(paid))}</td><td class="money-cell balance-cell">${hasTotal ? escapeHtml(money(balance)) : '—'}</td><td><span class="badge ${!hasTotal ? 'gray' : paid ? 'amber' : 'gray'}">${!hasTotal ? 'Sin precio' : paid ? 'Abono parcial' : 'Sin cobro'}</span></td><td><button class="order-click" type="button" data-record-payment="${escapeHtml(order.id)}">${hasTotal ? 'Registrar abono' : 'Definir total'}</button></td></tr>`).join('') : '<tr><td colspan="7" class="empty-state">No hay saldos pendientes en órdenes abiertas.</td></tr>';
+  const orderedPayments = [...payments].sort((a, b) => String(b.paid_on || '').localeCompare(String(a.paid_on || '')) || String(b.created_at || '').localeCompare(String(a.created_at || '')));
+  const paymentsBody = $('#paymentsBody');
+  if (paymentsBody) paymentsBody.innerHTML = orderedPayments.map((payment) => {
+    const order = orderById(payment.service_order_id);
+    return `<tr><td>${escapeHtml(payment.paid_on || '—')}</td><td class="primary-cell">${escapeHtml(order ? orderNumber(order) : 'Orden eliminada')}<span class="subcell">${escapeHtml(order?.customer?.name || '')} · ${escapeHtml(orderTitle(order || {}))}</span></td><td>${escapeHtml(payment.method || '—')}</td><td>${escapeHtml(payment.reference || '—')}</td><td class="money-cell paid-cell">${escapeHtml(money(payment.amount))}</td></tr>`;
+  }).join('');
+  const paymentsEmpty = $('#paymentsEmpty');
+  if (paymentsEmpty) paymentsEmpty.hidden = payments.length > 0;
+  const count = $('#paymentCount');
+  if (count) count.textContent = `${payments.length} cobro${payments.length === 1 ? '' : 's'}`;
+}
+
+function renderPaymentOrderOptions(selectedId = '') {
+  const select = $('#paymentOrder');
+  if (!select) return;
+  const eligible = eligiblePaymentOrders(orders);
+  select.innerHTML = eligible.length ? '<option value="">Selecciona una orden</option>' + eligible.map((order) => `<option value="${escapeHtml(order.id)}">${escapeHtml(orderNumber(order))} · saldo ${escapeHtml(money(orderBalance(order, payments)))} · ${escapeHtml(order.customer?.name || '')} · ${escapeHtml(orderTitle(order))}</option>`).join('') : '<option value="">No hay órdenes disponibles</option>';
+  select.disabled = !eligible.length;
+  if (eligible.some((order) => order.id === selectedId)) select.value = selectedId;
+}
+
+function updatePaymentBalanceHint() {
+  const hint = $('#paymentBalanceHint');
+  const order = orderById($('#paymentOrder')?.value);
+  const amountInput = $('#paymentAmount');
+  const totalInput = $('#paymentTotal');
+  const button = $('#savePaymentBtn');
+  if (!hint || !amountInput || !totalInput) return;
+  if (!order) {
+    hint.textContent = 'Selecciona una orden para consultar su saldo.';
+    hint.classList.remove('balance-error');
+    if (button) button.disabled = true;
+    return;
+  }
+  const total = Number(totalInput.value) || 0;
+  const paid = orderPaidTotal(order.id, payments);
+  const balance = Math.max(0, Math.round((total - paid + Number.EPSILON) * 100) / 100);
+  const amount = Number(amountInput.value) || 0;
+  const error = total <= 0 ? 'Captura un total final mayor que cero.' : total > 9999999999.99 ? 'El total final excede el límite permitido.' : total < paid ? 'El total no puede ser menor que lo ya abonado.' : amount > balance ? 'El importe recibido supera el saldo disponible.' : '';
+  hint.innerHTML = `<strong>Abonado:</strong> ${escapeHtml(money(paid))} · <strong>Saldo:</strong> ${escapeHtml(money(balance))}${error ? `<br>${escapeHtml(error)}` : ''}`;
+  hint.classList.toggle('balance-error', Boolean(error));
+  if (button) button.disabled = Boolean(error) || amount <= 0;
+}
+
+function openPaymentModal(orderId = '') {
+  const eligible = eligiblePaymentOrders(orders);
+  if (!eligible.length) { notify('Primero registra una orden de servicio para poder asociar el cobro.'); return; }
+  $('#paymentForm').reset();
+  $('#paymentDate').value = localDateKey(new Date());
+  const defaultOrder = eligible.find((order) => orderBalance(order, payments) > 0) || eligible[0];
+  renderPaymentOrderOptions(orderId || defaultOrder.id);
+  const order = orderById($('#paymentOrder').value);
+  $('#paymentTotal').value = order ? Number(order.total_charge ?? order.estimate_total ?? 0) || '' : '';
+  $('#paymentAmount').value = '';
+  updatePaymentBalanceHint();
+  $('#paymentModal').classList.add('open');
+  $('#paymentOrder').focus();
+}
+
+function closePaymentModal() { $('#paymentModal')?.classList.remove('open'); }
+
+async function savePayment(event) {
+  event.preventDefault();
+  const order = orderById($('#paymentOrder').value);
+  if (!order) { notify('Selecciona una orden antes de registrar el cobro.'); return; }
+  const total = Math.round((Number($('#paymentTotal').value) + Number.EPSILON) * 100) / 100;
+  const payment = {
+    id: uuid(), service_order_id: order.id, paid_on: $('#paymentDate').value,
+    amount: Math.round((Number($('#paymentAmount').value) + Number.EPSILON) * 100) / 100,
+    method: $('#paymentMethod').value, reference: $('#paymentReference').value.trim()
+  };
+  const currentTotal = orderChargeTotal(order);
+  const orderWithTotal = total !== currentTotal ? { ...order, total_charge: total, updated_at: nowIso() } : order;
+  const validationError = validatePaymentBalance(payment, orderWithTotal, payments);
+  if (validationError) { notify(validationError); updatePaymentBalanceHint(); return; }
+  const button = $('#savePaymentBtn');
+  button.disabled = true;
+  try {
+    if (orderWithTotal !== order) await backend.saveOrder(orderWithTotal);
+    await backend.savePayment(payment);
+    renderAll(); closePaymentModal();
+    notify(`Cobro de ${money(payment.amount)} registrado para ${orderNumber(order)}.`);
+  } catch (error) { renderAll(); notify(`No se pudo registrar el cobro: ${error.message || 'revisa la conexión y el saldo.'}`); }
+  finally { button.disabled = false; updatePaymentBalanceHint(); }
+}
+
 function updateExpenseProofPreview() {
   const preview = $('#expenseProofPreview');
   const input = $('#expenseProof');
@@ -1132,7 +1317,7 @@ async function saveExpense(event) {
       }
     }
     if (cloudMode && proofFile) refreshCloudUsage(true);
-    renderExpenses(); closeExpenseModal(); notify(proofFile ? 'Gasto e imagen del justificante guardados.' : 'Gasto registrado.');
+    renderExpenses(); renderEarnings(); closeExpenseModal(); notify(proofFile ? 'Gasto e imagen del justificante guardados.' : 'Gasto registrado.');
   } catch (error) { notify(`No se pudo registrar: ${error.message}`); }
 }
 
@@ -1143,14 +1328,22 @@ function downloadCsv(filename, rows) {
   const link = document.createElement('a'); link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url);
 }
 function exportOrders() {
-  const rows = [['Folio','Fecha','Cliente','Teléfono','Vehículo','Año','Placas','Motivo','Técnico','Estado','Estimación MXN']];
-  orders.forEach((order) => rows.push([orderNumber(order), fmtDate(order.received_at), order.customer?.name, order.customer?.phone, orderTitle(order), order.vehicle?.year, order.vehicle?.plate, order.reason, order.technician, order.status, order.estimate_total]));
+  const rows = [['Folio','Fecha','Cliente','Teléfono','Vehículo','Año','Placas','Motivo','Técnico','Entrega estimada','Estado','Estimación MXN','Total final MXN','Cobrado MXN','Saldo MXN']];
+  orders.forEach((order) => rows.push([orderNumber(order), fmtDate(order.received_at), order.customer?.name, order.customer?.phone, orderTitle(order), order.vehicle?.year, order.vehicle?.plate, order.reason, order.technician, order.estimated_ready_at || '', order.status, order.estimate_total, order.total_charge ?? '', orderPaidTotal(order.id, payments), orderBalance(order, payments)]));
   downloadCsv('taller-control-ordenes.csv', rows);
 }
 function exportExpenses() {
   const rows = [['Fecha','Descripción','Categoría','Orden','Importe MXN']];
   expenses.forEach((expense) => rows.push([expense.expense_date, expense.description, expense.category, orderNumber(orders.find((order) => order.id === expense.service_order_id) || {}), expense.amount]));
   downloadCsv('taller-control-gastos.csv', rows);
+}
+function exportPayments() {
+  const rows = [['Fecha','Folio','Cliente','Vehículo','Placas','Método','Nota / referencia','Importe MXN']];
+  payments.forEach((payment) => {
+    const order = orderById(payment.service_order_id) || {};
+    rows.push([payment.paid_on, orderNumber(order), order.customer?.name, orderTitle(order), order.vehicle?.plate, payment.method, payment.reference, payment.amount]);
+  });
+  downloadCsv('taller-control-cobros.csv', rows);
 }
 
 async function saveInspection() {
@@ -1298,6 +1491,19 @@ function registerEvents() {
   $('#modalBackdrop')?.addEventListener('click', (event) => { if (event.target === $('#modalBackdrop')) $('#modalBackdrop').classList.remove('open'); });
   $('#addExpenseBtn')?.addEventListener('click', openExpenseModal);
   $('#expenseForm')?.addEventListener('submit', saveExpense);
+  $('#addPaymentBtn')?.addEventListener('click', () => openPaymentModal());
+  $('#paymentForm')?.addEventListener('submit', savePayment);
+  $('#closePaymentModal')?.addEventListener('click', closePaymentModal);
+  $('#cancelPayment')?.addEventListener('click', closePaymentModal);
+  $('#paymentModal')?.addEventListener('click', (event) => { if (event.target === $('#paymentModal')) closePaymentModal(); });
+  $('#paymentOrder')?.addEventListener('change', () => {
+    const order = orderById($('#paymentOrder').value);
+    $('#paymentTotal').value = order ? Number(order.total_charge ?? order.estimate_total ?? 0) || '' : '';
+    updatePaymentBalanceHint();
+  });
+  ['paymentAmount', 'paymentTotal'].forEach((id) => $(`#${id}`)?.addEventListener('input', updatePaymentBalanceHint));
+  $('#calendarPrevBtn')?.addEventListener('click', () => { calendarCursor = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() - 1, 1); renderUpcomingCalendar(); });
+  $('#calendarNextBtn')?.addEventListener('click', () => { calendarCursor = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() + 1, 1); renderUpcomingCalendar(); });
   $('#expenseProof')?.addEventListener('change', updateExpenseProofPreview);
   $('#expenseProofQuickInput')?.addEventListener('change', (event) => attachExpenseProof(event.target.files?.[0] || null));
   $('#expensesBody')?.addEventListener('click', async (event) => {
@@ -1318,6 +1524,7 @@ function registerEvents() {
   $('#expenseModal')?.addEventListener('click', (event) => { if (event.target === $('#expenseModal')) closeExpenseModal(); });
   $('#exportOrdersBtn')?.addEventListener('click', exportOrders);
   $('#exportExpensesBtn')?.addEventListener('click', exportExpenses);
+  $('#exportPaymentsBtn')?.addEventListener('click', exportPayments);
   $('#resetDemoBtn')?.addEventListener('click', async () => {
     if (!publicDemoBuild) { notify('El restablecimiento solo está disponible en la demo ficticia.'); return; }
     if (!window.confirm('Esto restablecerá solo los datos aislados de esta demo en este navegador. ¿Continuar?')) return;
@@ -1325,7 +1532,7 @@ function registerEvents() {
       const proofKeys = expenses.map((expense) => expense.proof?.localKey).filter(Boolean);
       await Promise.all(proofKeys.map(deleteLocalPhoto));
       const sample = demoOrder();
-      writeLocal(LOCAL_ORDERS_KEY, [sample]); writeLocal(LOCAL_EXPENSES_KEY, []); orders = [sample]; expenses = []; activeOrderId = null; approvalOrderId = sample.id; renderAll(); notify('Demo ficticia restablecida.');
+      writeLocal(LOCAL_ORDERS_KEY, [sample]); writeLocal(LOCAL_EXPENSES_KEY, []); writeLocal(LOCAL_PAYMENTS_KEY, []); orders = [sample]; expenses = []; payments = []; activeOrderId = null; approvalOrderId = sample.id; renderAll(); notify('Demo ficticia restablecida.');
     } catch (error) { notify(`No se pudo restablecer la demo: ${error.message || 'intenta de nuevo.'}`); }
   });
   $('#resetTestBtn')?.addEventListener('click', async () => {
@@ -1333,8 +1540,8 @@ function registerEvents() {
     try {
       const photoKeys = [...orders.flatMap((order) => order.evidence || []).map((photo) => photo.localKey), ...expenses.map((expense) => expense.proof?.localKey)].filter(Boolean);
       await Promise.all(photoKeys.map(deleteLocalPhoto));
-      orders = []; expenses = [];
-      writeLocal(LOCAL_ORDERS_KEY, orders); writeLocal(LOCAL_EXPENSES_KEY, expenses);
+      orders = []; expenses = []; payments = [];
+      writeLocal(LOCAL_ORDERS_KEY, orders); writeLocal(LOCAL_EXPENSES_KEY, expenses); writeLocal(LOCAL_PAYMENTS_KEY, payments);
       teamMembers = []; localTeamName = 'Equipo de taller';
       writeLocal(LOCAL_TEAM_KEY, teamMembers); writeLocal(LOCAL_TEAM_NAME_KEY, localTeamName);
       activeOrderId = null; approvalOrderId = null;
@@ -1354,11 +1561,11 @@ function registerEvents() {
     const deleteExpense = event.target.closest('[data-delete-expense]');
     if (deleteExpense) {
       if (!window.confirm('¿Eliminar este gasto del registro?')) return;
-      try { await backend.deleteExpense(deleteExpense.dataset.deleteExpense); renderExpenses(); notify('Gasto eliminado.'); } catch (error) { notify(`No se pudo eliminar: ${error.message}`); }
+      try { await backend.deleteExpense(deleteExpense.dataset.deleteExpense); renderExpenses(); renderEarnings(); notify('Gasto eliminado.'); } catch (error) { notify(`No se pudo eliminar: ${error.message}`); }
     }
   });
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') { $('#modalBackdrop')?.classList.remove('open'); $('#expenseModal')?.classList.remove('open'); closeTeamModal(); closeUserAdminModal(); $('#sidebar')?.classList.remove('open'); }
+    if (event.key === 'Escape') { $('#modalBackdrop')?.classList.remove('open'); $('#expenseModal')?.classList.remove('open'); closePaymentModal(); closeTeamModal(); closeUserAdminModal(); $('#sidebar')?.classList.remove('open'); }
   });
   window.addEventListener('online', () => { if (localMode) setConnection('Modo local', 'local'); });
   window.addEventListener('offline', () => setConnection('Sin conexión', 'offline'));
@@ -1382,7 +1589,7 @@ function updateStaticText() {
   const ordersFoot = $('#view-orders .table-foot span:first-child');
   if (ordersFoot) ordersFoot.textContent = localMode ? 'Datos locales de este navegador.' : cloudMode ? 'Órdenes compartidas en Supabase con políticas RLS.' : 'Órdenes compartidas en la base SQLite local.';
   const sideNote = $('.side-note p');
-  if (sideNote) sideNote.textContent = localMode ? 'Recepción, inspección, órdenes, aprobación interna y gastos; guardados en este navegador.' : cloudMode ? 'Órdenes y gastos en Supabase Free; evidencia privada con límite interno. Revisa las cuotas del proveedor.' : 'Órdenes, gastos y evidencia compartidos en SQLite dentro de la red local del taller.';
+  if (sideNote) sideNote.textContent = localMode ? 'Órdenes, calendario, cobros y gastos guardados en este navegador.' : cloudMode ? 'Órdenes, calendario, cobros y gastos en Supabase Free; evidencia privada con límite interno.' : 'Órdenes, calendario, cobros, gastos y evidencia en SQLite local del taller.';
   const storageCallout = $$('#view-reception .summary-card .callout').find((item) => item.textContent.includes('Almacenamiento local'));
   if (storageCallout && serverMode) storageCallout.innerHTML = '<strong>Almacenamiento del taller:</strong> esta recepción se comparte con las demás sesiones autorizadas en SQLite local.';
   if (storageCallout && cloudMode) storageCallout.innerHTML = '<strong>Almacenamiento privado en Supabase:</strong> solo cuentas autorizadas acceden a órdenes y fotos; cada foto admite hasta 10 MB y hay un tope preventivo interno para evidencia.';

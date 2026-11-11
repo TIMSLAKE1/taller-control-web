@@ -11,6 +11,7 @@ import {
   dataDir, evidenceDir, getDatabase, hashToken, nowIso, publicUser, verifyPassword,
   createMechanic, listMechanics, setMechanicActive
 } from './db.js';
+import { validatePaymentBalance } from '../src/finance.js';
 
 const db = getDatabase();
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -183,7 +184,9 @@ function listData() {
     amount: row.amount, service_order_id: row.service_order_id, created_at: row.created_at,
     proof: row.proof_id ? { photoId: row.proof_id, name: row.proof_name, type: row.proof_type, size: row.proof_size, created_at: row.proof_created_at } : null
   }));
-  return { orders, expenses };
+  const payments = db.prepare(`SELECT id, service_order_id, paid_on, amount, method, reference, created_by, created_at
+    FROM service_order_payments ORDER BY paid_on DESC, created_at DESC`).all();
+  return { orders, expenses, payments: payments.map((payment) => ({ ...payment, amount: Number(payment.amount) })) };
 }
 function mimeType(filePath) {
   return ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.ico': 'image/x-icon', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json' })[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
@@ -338,6 +341,36 @@ async function handleApi(req, res, pathname) {
     db.prepare(`INSERT INTO shop_expenses (id,expense_date,category,description,amount,service_order_id,created_by,created_at)
       VALUES (@id,@expense_date,@category,@description,@amount,@service_order_id,@created_by,@created_at)`).run(expense);
     return sendJson(res, 201, { expense });
+  }
+
+  if (pathname === '/api/payments' && req.method === 'POST') {
+    const body = await readJson(req);
+    const payment = {
+      id: typeof body.id === 'string' ? body.id : randomUUID(),
+      service_order_id: String(body.service_order_id || ''),
+      paid_on: String(body.paid_on || ''),
+      amount: Number(body.amount),
+      method: String(body.method || ''),
+      reference: String(body.reference || '').trim(),
+      created_by: session.id,
+      created_at: nowIso()
+    };
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const orderRow = db.prepare('SELECT data_json FROM service_orders WHERE id = ?').get(payment.service_order_id);
+      if (!orderRow) fail(404, 'No se encontró la orden relacionada con el cobro.');
+      const order = JSON.parse(orderRow.data_json);
+      const previousPayments = db.prepare('SELECT service_order_id, amount FROM service_order_payments WHERE service_order_id = ?').all(payment.service_order_id);
+      const validationError = validatePaymentBalance(payment, order, previousPayments);
+      if (validationError) fail(400, validationError);
+      db.prepare(`INSERT INTO service_order_payments (id,service_order_id,paid_on,amount,method,reference,created_by,created_at)
+        VALUES (@id,@service_order_id,@paid_on,@amount,@method,@reference,@created_by,@created_at)`).run(payment);
+      db.exec('COMMIT');
+    } catch (error) {
+      try { db.exec('ROLLBACK'); } catch {}
+      throw error;
+    }
+    return sendJson(res, 201, { payment });
   }
 
   const expenseProofUploadMatch = pathname.match(/^\/api\/expenses\/([^/]+)\/proof$/);

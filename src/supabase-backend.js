@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { validatePaymentFields } from './finance.js';
 
 const SUPABASE_URL = String(import.meta.env.VITE_SUPABASE_URL || '').trim().replace(/\/$/, '');
 const SUPABASE_PUBLISHABLE_KEY = String(import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim();
@@ -134,11 +135,26 @@ async function createTechnician(body) {
   return data;
 }
 
+async function fetchAllPayments(db) {
+  const rows = [];
+  const pageSize = 500;
+  for (let offset = 0; ; offset += pageSize) {
+    const result = await db.from('service_order_payments')
+      .select('id,service_order_id,paid_on,amount,method,reference,created_by,created_at')
+      .order('created_at', { ascending: true }).order('id', { ascending: true }).range(offset, offset + pageSize - 1);
+    const page = throwIfError(result) || [];
+    rows.push(...page);
+    if (page.length < pageSize) break;
+  }
+  return rows;
+}
+
 async function loadData() {
   const db = client();
-  const [orderResult, expenseResult, orderFileResult, expenseFileResult] = await Promise.all([
+  const [orderResult, expenseResult, paymentRows, orderFileResult, expenseFileResult] = await Promise.all([
     db.from('service_orders').select('id,order_number,received_at,status,customer_name,vehicle_plate,data_json,created_at,updated_at').order('received_at', { ascending: false }).limit(2000),
     db.from('shop_expenses').select('id,expense_date,category,description,amount,service_order_id,created_at').order('expense_date', { ascending: false }).limit(2000),
+    fetchAllPayments(db),
     db.from('evidence_files').select('id,service_order_id,original_name,media_type,size,created_at').order('created_at').limit(12000),
     db.from('expense_evidence_files').select('id,expense_id,original_name,media_type,size,created_at').order('created_at').limit(4000)
   ]);
@@ -158,7 +174,8 @@ async function loadData() {
   const orders = orderRows.map((row) => ({ ...(row.data_json || {}), id: row.id, order_number: row.order_number, received_at: row.received_at, status: row.status,
     created_at: row.created_at, updated_at: row.updated_at, evidence: filesByOrder.get(row.id) || [] }));
   const expenses = expenseRows.map((row) => ({ ...row, amount: Number(row.amount), proof: proofByExpense.get(row.id) || null }));
-  return { orders, expenses };
+  const payments = paymentRows.map((row) => ({ ...row, amount: Number(row.amount) }));
+  return { orders, expenses, payments };
 }
 
 async function saveOrder(order) {
@@ -178,6 +195,22 @@ async function saveOrder(order) {
   const { error } = await client().from('service_orders').upsert(payload, { onConflict: 'id' });
   if (error) throw translateError(error);
   return { order: { ...order, received_at: payload.received_at, created_at: payload.created_at, updated_at: payload.updated_at } };
+}
+
+async function savePayment(body) {
+  const validationError = validatePaymentFields(body);
+  if (validationError) throw apiError(validationError, 400);
+  const session = await client().auth.getUser();
+  if (!session.data?.user) throw apiError('Inicia sesión de nuevo.', 401);
+  const payload = {
+    id: body.id, service_order_id: body.service_order_id, paid_on: body.paid_on,
+    amount: Number(body.amount), method: body.method, reference: String(body.reference || '').trim(),
+    created_by: session.data.user.id
+  };
+  const { data, error } = await client().from('service_order_payments').insert(payload)
+    .select('id,service_order_id,paid_on,amount,method,reference,created_by,created_at').single();
+  if (error) throw translateError(error);
+  return { payment: { ...data, amount: Number(data.amount) } };
 }
 
 async function saveExpense(body) {
@@ -350,6 +383,7 @@ async function apiRequest(rawUrl, options = {}) {
     const orderMatch = pathname.match(/^\/api\/orders\/([^/]+)$/);
     if (orderMatch && method === 'PUT') return await saveOrder(body);
     if (pathname === '/api/expenses' && method === 'POST') return await saveExpense(body || {});
+    if (pathname === '/api/payments' && method === 'POST') return await savePayment(body || {});
     const expenseProofMatch = pathname.match(/^\/api\/expenses\/([^/]+)\/proof$/);
     if (expenseProofMatch && method === 'POST') return await uploadExpenseProof(decodeURIComponent(expenseProofMatch[1]), body);
     if (expenseProofMatch && method === 'DELETE') return await removeExpenseProof(decodeURIComponent(expenseProofMatch[1]));

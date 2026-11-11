@@ -71,3 +71,16 @@ test('los comprobantes de gastos quedan asociados y se eliminan en cascada', () 
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM shop_expenses').get().count, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM expense_evidence_files').get().count, 0);
 });
+
+test('los cobros guardan historial asociado y bloquean el borrado de una orden cobrada', () => {
+  const db = getDatabase();
+  const timestamp = nowIso();
+  const orderId = 'order-payment-test';
+  db.prepare(`INSERT INTO service_orders (id,order_number,received_at,status,customer_name,vehicle_plate,data_json,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run(orderId, 'OS-PAY-0001', timestamp, 'En servicio', 'Cliente de prueba', 'TEST-100', JSON.stringify({ id: orderId, total_charge: 250 }), timestamp, timestamp);
+  db.prepare(`INSERT INTO service_order_payments (id,service_order_id,paid_on,amount,method,reference,created_by,created_at)
+    VALUES (?,?,?,?,?,?,NULL,?)`).run('payment-db-test', orderId, '2026-11-11', 100, 'Efectivo', 'Anticipo de prueba', timestamp);
+  const payment = db.prepare('SELECT service_order_id, amount, method, reference FROM service_order_payments WHERE id = ?').get('payment-db-test');
+  assert.deepEqual({ ...payment }, { service_order_id: orderId, amount: 100, method: 'Efectivo', reference: 'Anticipo de prueba' });
+  assert.throws(() => db.prepare('DELETE FROM service_orders WHERE id = ?').run(orderId), /FOREIGN KEY constraint failed/);
+});
