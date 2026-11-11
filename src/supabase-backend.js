@@ -367,6 +367,13 @@ async function apiRequest(rawUrl, options = {}) {
       if (error) throw translateError(error);
       return { ok: true };
     }
+    if (pathname === '/api/technicians' && method === 'GET') {
+      const profile = await activeSessionProfile();
+      if (!profile) throw apiError('Inicia sesión con una cuenta de técnico autorizada.', 401);
+      const { data, error } = await db.rpc('get_active_technician_names');
+      if (error) throw translateError(error);
+      return { technicians: (Array.isArray(data) ? data : []).map((row) => ({ display_name: row.display_name })) };
+    }
     if (pathname === '/api/admin/users' && method === 'GET') {
       const manager = await activeSessionProfile();
       if (!manager?.is_manager) throw apiError('Solo el encargado puede administrar las cuentas de técnicos.', 403);

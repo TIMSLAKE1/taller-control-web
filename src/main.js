@@ -1,5 +1,6 @@
 import { buildApprovalMessage, buildEmailDraftUrl, buildWhatsAppDraftUrl } from './approval.js';
 import { getPrivateEvidence, isSupabaseConfigured, registerInitialAccount, supabaseRequest } from './supabase-backend.js';
+import { normalizeTechnicianNames } from './technician-roster.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -43,6 +44,7 @@ let orders = [];
 let expenses = [];
 let authorizedUsers = [];
 let teamMembers = [];
+let activeTechnicianNames = [];
 let localTeamName = 'Equipo de taller';
 let activeOrderId = null;
 let approvalOrderId = null;
@@ -155,8 +157,7 @@ function startServerRefresh() {
   refreshTimer = setInterval(async () => {
     if (document.hidden || !user) return;
     try {
-      const data = await serverRequest('/api/data');
-      orders = data.orders || []; expenses = data.expenses || [];
+      await backend.loadData();
       setConnection(cloudMode ? 'Supabase Free' : 'Servidor SQLite', cloudMode ? 'cloud' : 'server'); renderAll();
       if (cloudMode) refreshCloudUsage();
     } catch (error) {
@@ -281,7 +282,18 @@ const backend = {
     return true;
   },
   async loadData() {
-    const data = await serverRequest('/api/data');
+    let data;
+    if (cloudMode) {
+      const [ordersData, technicianData] = await Promise.all([
+        serverRequest('/api/data'), serverRequest('/api/technicians')
+      ]);
+      data = ordersData;
+      activeTechnicianNames = normalizeTechnicianNames(technicianData.technicians);
+      const select = $('#technician');
+      if (select) renderCloudTechnicianSelect(select.value, select.dataset.unlistedTechnician || '');
+    } else {
+      data = await serverRequest('/api/data');
+    }
     orders = data.orders || [];
     expenses = data.expenses || [];
   },
@@ -460,7 +472,13 @@ function setupTeamUi() {
   }
   if (!$('#teamProfileStyles')) document.head.insertAdjacentHTML('beforeend', '<style id="teamProfileStyles">.team-profile{width:100%;border:0;background:transparent;color:inherit;text-align:left;border-radius:12px;cursor:pointer;transition:background .15s}.team-profile:hover:not(:disabled){background:#f6f8f5}.team-profile:disabled{opacity:1;cursor:default}</style>');
   const technician = $('#technician');
-  if (technician && !$('#teamMemberSuggestions')) {
+  if (cloudMode && technician && technician.tagName !== 'SELECT') {
+    const select = document.createElement('select');
+    select.id = 'technician';
+    technician.replaceWith(select);
+    select.insertAdjacentHTML('afterend', '<div class="hint" id="technicianRosterHint" aria-live="polite">Consultando técnicos activos autorizados…</div>');
+    renderCloudTechnicianSelect();
+  } else if (technician && !$('#teamMemberSuggestions')) {
     technician.setAttribute('list', 'teamMemberSuggestions');
     technician.insertAdjacentHTML('afterend', '<datalist id="teamMemberSuggestions"></datalist>');
   }
@@ -554,6 +572,33 @@ function renderTeamUi() {
   if (datalist) datalist.innerHTML = teamMembers.map((member) => `<option value="${escapeHtml(member.name)}">${escapeHtml(member.role)}</option>`).join('');
 }
 
+function renderCloudTechnicianSelect(currentName = undefined, historicalName = undefined) {
+  if (!cloudMode) return;
+  const select = $('#technician');
+  if (!select || select.tagName !== 'SELECT') return;
+  const clearPreviousValue = '__clear_previous_technician__';
+  const currentValue = currentName === undefined ? select.value : currentName;
+  const previousName = historicalName !== undefined
+    ? historicalName || (currentValue && currentValue !== clearPreviousValue && !activeTechnicianNames.includes(currentValue) ? currentValue : '')
+    : select.dataset.unlistedTechnician || (currentValue && currentValue !== clearPreviousValue && !activeTechnicianNames.includes(currentValue) ? currentValue : '');
+  const unlistedName = previousName && !activeTechnicianNames.includes(previousName) ? previousName : '';
+  select.replaceChildren(new Option('Por asignar', ''));
+  activeTechnicianNames.forEach((name) => select.add(new Option(name, name)));
+  if (unlistedName) select.add(new Option('Quitar responsable anterior', clearPreviousValue));
+  select.value = currentValue === clearPreviousValue && unlistedName
+    ? clearPreviousValue
+    : activeTechnicianNames.includes(currentValue) ? currentValue : '';
+  select.dataset.unlistedTechnician = unlistedName;
+  const hint = $('#technicianRosterHint');
+  if (hint) {
+    hint.textContent = unlistedName
+      ? `Asignación previa: ${unlistedName}. Ya no aparece entre técnicos activos; se conserva salvo que reasignes o elijas “Quitar responsable anterior”.`
+      : activeTechnicianNames.length
+        ? 'Solo aparecen cuentas activas autorizadas como técnico.'
+        : 'No hay técnicos activos autorizados para asignar.';
+  }
+}
+
 function openTeamModal() {
   if (!localMode || publicDemoBuild) return;
   $('#teamNameInput').value = localTeamName;
@@ -612,6 +657,7 @@ function clearForm() {
   $('#receivedAt').value = localDateTime();
   $('#reason').value = 'Seleccionar motivo';
   $('#technician').value = '';
+  if (cloudMode) renderCloudTechnicianSelect('', '');
   $$('.fuel-option').forEach((el) => el.classList.remove('selected'));
   $$('#accessoriesList input, #documentsList input').forEach((el) => { el.checked = false; });
   $$('.fluid-item select').forEach((el) => { el.value = 'Revisar'; });
@@ -630,7 +676,8 @@ function fillForm(order) {
   Object.entries(fields).forEach(([id, value]) => { const el = $(`#${id}`); if (el) el.value = value ?? ''; });
   $('#receivedAt').value = localDateTime(order.received_at || new Date());
   $('#reason').value = order.reason || 'Seleccionar motivo';
-  $('#technician').value = order.technician || '';
+  if (cloudMode) renderCloudTechnicianSelect(order.technician || '', order.technician || '');
+  else $('#technician').value = order.technician || '';
   $$('.fuel-option').forEach((el) => el.classList.toggle('selected', el.textContent.trim() === order.fuel_level));
   const checkSet = (container, values) => $$('#' + container + ' label').forEach((label) => { const input = $('input', label); input.checked = (values || []).includes(label.textContent.trim()); });
   checkSet('accessoriesList', order.inventory?.accessories);
@@ -651,12 +698,17 @@ function selectedChecks(container) {
 function readForm(previous = {}) {
   const received = $('#receivedAt').value ? new Date($('#receivedAt').value).toISOString() : nowIso();
   const fluids = Object.fromEntries($$('.fluid-item').map((label) => [label.firstChild.textContent.trim(), $('select', label).value]));
+  const technicianSelect = $('#technician');
+  const clearPreviousTechnician = technicianSelect.value === '__clear_previous_technician__';
+  const technician = cloudMode
+    ? clearPreviousTechnician ? '' : technicianSelect.value || technicianSelect.dataset.unlistedTechnician || ''
+    : technicianSelect.value.trim();
   return {
     ...previous,
     id: previous.id || uuid(), order_number: previous.order_number || nextOrderNumber(), is_demo: Boolean(previous.is_demo),
     customer: { name: $('#custName').value.trim(), phone: $('#custPhone').value.trim(), email: $('#custEmail').value.trim(), city: $('#custCity').value.trim(), address: $('#custAddress').value.trim(), notes: $('#custNotes').value.trim() },
     vehicle: { plate: $('#plate').value.trim().toUpperCase(), vin: $('#vin').value.trim(), make: $('#make').value.trim(), model: $('#model').value.trim(), year: $('#year').value.trim(), color: $('#color').value.trim(), notes: $('#vehicleNotes').value.trim() },
-    received_at: received, reason: $('#reason').value, technician: $('#technician').value.trim(),
+    received_at: received, reason: $('#reason').value, technician,
     failure_summary: $('#failure').value.trim(), reported_issue: $('#reportedIssue').value.trim(),
     odometer: Number(String($('#odometer').value).replace(/[^\d]/g, '')) || null,
     fuel_level: $('.fuel-option.selected')?.textContent.trim() || '', physical_notes: $('#physicalNotes').value.trim(),
