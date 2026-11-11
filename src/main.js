@@ -742,7 +742,7 @@ function renderDashboard() {
   const counts = $$('.flow-step .step-count', $('#view-home'));
   [orders.filter((o) => !['Cancelada'].includes(o.status)).length, inspections.length, ready.length, pending.length].forEach((value, index) => { if (counts[index]) counts[index].textContent = String(value).padStart(2, '0'); });
   const badge = $('#view-home .dashboard-grid .flow-head .badge');
-  if (badge) { badge.textContent = cloudMode ? 'Supabase Free' : publicDemoBuild ? 'Demo aislada' : cleanTestBuild ? 'Prueba limpia' : 'SQLite local'; badge.className = `badge ${cloudMode ? 'blue' : publicDemoBuild ? 'violet' : cleanTestBuild ? 'blue' : 'green'}`; }
+  if (badge) { badge.textContent = cloudMode ? 'Supabase Free' : publicDemoBuild ? 'Demo aislada' : cleanTestBuild ? 'Prueba limpia' : 'SQLite local'; badge.className = `badge ${publicDemoBuild ? 'violet' : cleanTestBuild ? 'blue' : 'green'}`; }
   const banner = $('#view-home .demo-banner div');
   if (banner) banner.innerHTML = publicDemoBuild
     ? '<strong>Demostración:</strong> contiene un expediente inventado y separado de los datos operativos. Los cambios de esta demo se quedan en este navegador.'
