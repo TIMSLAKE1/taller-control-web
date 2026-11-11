@@ -17,6 +17,7 @@ function sourceBlock(source, start, end) {
 }
 
 test('la autenticación pública solo ofrece iniciar sesión, sin registro inicial ni alta directa desde navegador', () => {
+  assert.match(main, /<div class="brand-name">Taller Control<\/div><h2>Iniciar sesión<\/h2>/);
   assert.match(main, /<h2>Iniciar sesión<\/h2>/);
   assert.match(main, /serverRequest\('\/api\/auth\/login',\s*\{\s*method:\s*'POST'/);
   assert.doesNotMatch(main, /Crear cuenta inicial|toggleAuthMode|registerInitialAccount/);
