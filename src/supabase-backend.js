@@ -372,7 +372,15 @@ async function apiRequest(rawUrl, options = {}) {
     if (pathname === '/api/storage-usage' && method === 'GET') return await storageUsage();
     throw apiError('Ruta de servicio no encontrada.', 404);
   } catch (error) {
-    throw translateError(error);
+    const translated = translateError(error);
+    if (translated?.code === '42501') {
+      const { data: authData, error: authError } = await db.auth.getUser();
+      if (authError || !authData?.user) {
+        await db.auth.signOut({ scope: 'local' }).catch(() => {});
+        throw apiError('La sesión venció o fue revocada; vuelve a iniciar sesión.', 401, 'session_not_found');
+      }
+    }
+    throw translated;
   }
 }
 

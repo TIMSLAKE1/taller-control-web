@@ -139,7 +139,13 @@ async function serverRequest(url, options = {}) {
     headers.set('Content-Type', body.type || 'application/octet-stream');
     if (body.name) headers.set('X-File-Name', body.name);
   }
-  if (cloudMode) return supabaseRequest(url, { ...options, headers, body });
+  if (cloudMode) {
+    try { return await supabaseRequest(url, { ...options, headers, body }); }
+    catch (error) {
+      if (error?.status === 401) lockExpiredSession();
+      throw error;
+    }
+  }
   const response = await fetch(url, { ...options, headers, body, credentials: 'same-origin', cache: 'no-store' });
   const result = response.status === 204 ? null : await response.json().catch(() => ({}));
   if (!response.ok) {

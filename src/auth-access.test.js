@@ -66,6 +66,14 @@ test('la Edge Function valida JWT y encargado activo antes de escribir invitaci�
   assert.match(supabaseConfig, /\[functions\.create-technician\][\s\S]*?verify_jwt\s*=\s*true/);
 });
 
+test('una sesión revocada vuelve a pedir ingreso sin ampliar los permisos anónimos', () => {
+  const cloudRequest = sourceBlock(main, 'async function serverRequest', 'function startServerRefresh()');
+  assert.match(cloudRequest, /if \(error\?\.status === 401\) lockExpiredSession\(\)/);
+  assert.match(backend, /const translated = translateError\(error\);[\s\S]*translated\?\.code === '42501'[\s\S]*db\.auth\.getUser\(\)[\s\S]*authError \|\| !authData\?\.user[\s\S]*db\.auth\.signOut\(\{ scope: 'local' \}\)[\s\S]*apiError\('La sesión venció o fue revocada; vuelve a iniciar sesión\.', 401/);
+  assert.match(backend, /throw translated;/);
+  assert.doesNotMatch(migration, /grant\s+(?:select|insert|update|delete)[^;]*\bto\s+anon/i);
+});
+
 test('la base de datos conserva invitaciones de un solo uso y políticas exclusivas del encargado', () => {
   assert.match(migration, /create policy technician_invitations_manager_all[\s\S]*?for all to authenticated[\s\S]*?using \(\(select private\.taller_user_is_manager\(\)\)\)[\s\S]*?with check \(\(select private\.taller_user_is_manager\(\)\)\)/i);
   assert.match(migration, /i\.token_hash = encode\(extensions\.digest\(v_token, 'sha256'\), 'hex'\)/i);
