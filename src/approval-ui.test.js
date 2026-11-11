@@ -23,9 +23,11 @@ test('la aprobación ofrece canales gratuitos y deja el envío en manos del tall
 
 test('la solicitud y respuesta se guardan en la orden local, con sus marcas de tiempo', () => {
   assert.match(main, /order\.approval_requested_at = nowIso\(\)/);
-  assert.match(main, /order\.approval_responded_at = nowIso\(\)/);
-  assert.match(main, /order\.approval_response_note = \$\('#approvalResponseNote'\)\.value\.trim\(\)/);
-  assert.match(main, /await backend\.saveOrder\(order\)/);
+  assert.match(main, /const respondedAt = nowIso\(\)/);
+  assert.match(main, /approval_responded_at: respondedAt, approval_recorded_at: respondedAt/);
+  assert.match(main, /approval_response_note: \$\('#approvalResponseNote'\)\.value\.trim\(\)/);
+  assert.match(main, /await backend\.saveOrder\(updated\)/);
+  assert.match(main, /applyApprovalDecision\(order, approved\)/);
   assert.match(main, /approval_requested_at \|\| null/);
   assert.match(main, /approval_responded_at \|\|/);
 });

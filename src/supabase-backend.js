@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { validatePaymentFields } from './finance.js';
+import { validateOrderFinancials, validatePaymentFields } from './finance.js';
 
 const SUPABASE_URL = String(import.meta.env.VITE_SUPABASE_URL || '').trim().replace(/\/$/, '');
 const SUPABASE_PUBLISHABLE_KEY = String(import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim();
@@ -181,6 +181,8 @@ async function loadData() {
 async function saveOrder(order) {
   if (!order || typeof order !== 'object' || typeof order.id !== 'string' || !/^[a-zA-Z0-9-]{8,80}$/.test(order.id)) throw apiError('Identificador de orden inválido.', 400);
   if (typeof order.order_number !== 'string' || order.order_number.length > 80) throw apiError('Folio de orden inválido.', 400);
+  const financialError = validateOrderFinancials(order);
+  if (financialError) throw apiError(financialError, 400);
   const payload = {
     id: order.id,
     order_number: order.order_number,

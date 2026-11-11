@@ -1,5 +1,16 @@
+import { diagnosticFee, hasDiagnosticFee, proposedOrderTotal, repairEstimateTotal, withApprovedQuote } from './finance.js';
+
 const cleanText = (value, limit = 500) => String(value ?? '').trim().slice(0, limit);
 const emailPattern = /^[^\s@?&#]+@[^\s@?&#]+\.[^\s@?&#]+$/;
+
+export function applyApprovalDecision(order, approved) {
+  const updated = {
+    ...order,
+    approval_status: approved ? 'approved' : 'changes_requested',
+    status: approved ? 'En servicio' : 'Aprobación'
+  };
+  return approved ? withApprovedQuote(updated) : updated;
+}
 
 export function buildApprovalMessage(order = {}) {
   const customer = order.customer || {};
@@ -8,14 +19,19 @@ export function buildApprovalMessage(order = {}) {
   const vehicleName = [vehicle.make, vehicle.model, vehicle.year].map((value) => cleanText(value, 80)).filter(Boolean).join(' ') || 'vehículo';
   const plate = cleanText(vehicle.plate, 30);
   const work = cleanText(order.work_scope, 500) || cleanText(order.reason, 100) || 'Por definir';
-  const estimate = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 2 }).format(Number(order.estimate_total || 0));
+  const formatMoney = (amount) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 2 }).format(Number(amount || 0));
+  const estimate = formatMoney(proposedOrderTotal(order));
   const note = cleanText(order.approval_note, 500);
   return [
     `Hola ${name}, te compartimos la propuesta del taller para que la revises.`,
     `Orden: ${cleanText(order.order_number, 80) || 'Sin folio'}.`,
     `Vehículo: ${vehicleName}${plate ? ` · placas ${plate}` : ''}.`,
     `Trabajo propuesto: ${work}.`,
-    `Estimación: ${estimate} MXN.`,
+    ...(hasDiagnosticFee(order) ? [
+      `Diagnóstico: ${formatMoney(diagnosticFee(order))} (se incluye una sola vez).`,
+      `Reparación propuesta adicional: ${formatMoney(repairEstimateTotal(order))}.`,
+      `Total propuesto: ${estimate}.`
+    ] : [`Estimación: ${estimate} MXN.`]),
     'Por favor responde si autorizas el trabajo propuesto o si solicitas cambios.',
     note ? `Nota adicional: ${note}` : ''
   ].filter(Boolean).join('\n');

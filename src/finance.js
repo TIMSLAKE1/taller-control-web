@@ -1,12 +1,36 @@
 export const PAYMENT_METHODS = ['Efectivo', 'Transferencia', 'Tarjeta', 'Otro'];
+export const DEFAULT_DIAGNOSTIC_FEE = 100;
+export const MAX_ORDER_AMOUNT = 9999999999.99;
 
 const asMoney = (value) => {
   const amount = Number(value);
   return Number.isFinite(amount) ? Math.round((amount + Number.EPSILON) * 100) / 100 : 0;
 };
+const validAmount = (value) => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= MAX_ORDER_AMOUNT;
+
+export function hasDiagnosticFee(order) {
+  return Number.isFinite(Number(order?.diagnostic_fee)) && Number(order.diagnostic_fee) > 0;
+}
+
+export function diagnosticFee(order) {
+  return hasDiagnosticFee(order) ? asMoney(order.diagnostic_fee) : 0;
+}
+
+export function repairEstimateTotal(order) {
+  if (!hasDiagnosticFee(order)) return 0;
+  if (order?.repair_estimate_total != null) return Math.max(0, asMoney(order.repair_estimate_total));
+  return Math.max(0, asMoney(Number(order?.estimate_total || 0) - diagnosticFee(order)));
+}
+
+export function proposedOrderTotal(order) {
+  if (hasDiagnosticFee(order)) return asMoney(diagnosticFee(order) + repairEstimateTotal(order));
+  return Math.max(0, asMoney(order?.estimate_total ?? order?.total_charge ?? 0));
+}
 
 export function orderChargeTotal(order) {
-  return Math.max(0, asMoney(order?.total_charge ?? order?.estimate_total ?? 0));
+  if (order?.total_charge != null) return Math.max(0, asMoney(order.total_charge));
+  if (hasDiagnosticFee(order)) return asMoney(diagnosticFee(order) + Number(order.authorized_repair_total || 0));
+  return Math.max(0, asMoney(order?.estimate_total ?? 0));
 }
 
 export function orderPaidTotal(orderId, payments = []) {
@@ -16,6 +40,46 @@ export function orderPaidTotal(orderId, payments = []) {
 
 export function orderBalance(order, payments = []) {
   return Math.max(0, asMoney(orderChargeTotal(order) - orderPaidTotal(order?.id, payments)));
+}
+
+// Treat approval as setting the order's total, not adding a second $100 payment.
+// This remains safe if the accepted quote is processed more than once.
+export function withApprovedQuote(order) {
+  if (!hasDiagnosticFee(order)) return { ...order };
+  const approvedRepair = repairEstimateTotal(order);
+  return {
+    ...order,
+    authorized_repair_total: approvedRepair,
+    total_charge: asMoney(diagnosticFee(order) + approvedRepair)
+  };
+}
+
+export function validateOrderFinancials(order, payments = []) {
+  if (!order || typeof order !== 'object') return 'La orden no es válida.';
+  for (const [label, value] of [
+    ['Cuota de diagnóstico', order.diagnostic_fee],
+    ['Importe de reparación', order.repair_estimate_total],
+    ['Importe de reparación autorizado', order.authorized_repair_total],
+    ['Estimación', order.estimate_total],
+    ['Total a cobrar', order.total_charge]
+  ]) {
+    if (value == null) continue;
+    if (!validAmount(value)) return `${label}: captura un importe entre $0.00 y $${MAX_ORDER_AMOUNT.toFixed(2)} MXN.`;
+  }
+  if (hasDiagnosticFee(order)) {
+    const expectedEstimate = asMoney(diagnosticFee(order) + repairEstimateTotal(order));
+    if (expectedEstimate > MAX_ORDER_AMOUNT || asMoney(order.estimate_total) !== expectedEstimate) {
+      return 'La estimación debe ser igual a la cuota de diagnóstico más la reparación propuesta.';
+    }
+    const authorizedRepair = asMoney(order.authorized_repair_total || 0);
+    const expectedCharge = asMoney(diagnosticFee(order) + authorizedRepair);
+    if (order.total_charge != null && asMoney(order.total_charge) !== expectedCharge) {
+      return 'El total vigente debe conservar la cuota de diagnóstico y la reparación aprobada.';
+    }
+  }
+  const paid = orderPaidTotal(order.id, payments);
+  if (orderChargeTotal(order) < paid) return `El total no puede ser menor que los ${paid.toFixed(2)} MXN ya abonados.`;
+  return '';
 }
 
 export function eligiblePaymentOrders(orders = []) {
@@ -48,7 +112,7 @@ export function validatePaymentFields(payment = {}) {
   if (typeof payment.id !== 'string' || !/^[a-zA-Z0-9-]{8,80}$/.test(payment.id)) return 'Identificador de cobro inválido.';
   if (typeof payment.service_order_id !== 'string' || !/^[a-zA-Z0-9-]{8,80}$/.test(payment.service_order_id)) return 'Selecciona una orden válida para el cobro.';
   if (!validDate) return 'Selecciona una fecha válida para el cobro.';
-  if (!Number.isFinite(amount) || amount <= 0 || amount > 9999999999.99) return 'El importe del cobro debe ser mayor que cero y no exceder el límite permitido.';
+  if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_ORDER_AMOUNT) return 'El importe del cobro debe ser mayor que cero y no exceder el límite permitido.';
   if (!PAYMENT_METHODS.includes(payment.method)) return 'Selecciona un método de pago válido.';
   if (String(payment.reference || '').length > 160) return 'La nota del cobro no puede superar 160 caracteres.';
   return '';

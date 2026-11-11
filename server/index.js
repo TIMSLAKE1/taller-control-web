@@ -11,7 +11,7 @@ import {
   dataDir, evidenceDir, getDatabase, hashToken, nowIso, publicUser, verifyPassword,
   createMechanic, listMechanics, setMechanicActive
 } from './db.js';
-import { validatePaymentBalance } from '../src/finance.js';
+import { validateOrderFinancials, validatePaymentBalance } from '../src/finance.js';
 
 const db = getDatabase();
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -170,6 +170,9 @@ function validateOrder(order, pathId) {
       fail(400, 'La evidencia incluye una foto que no pertenece a esta orden.');
     }
   }
+  const existingPayments = db.prepare('SELECT service_order_id, amount FROM service_order_payments WHERE service_order_id = ?').all(pathId);
+  const financialError = validateOrderFinancials(order, existingPayments);
+  if (financialError) fail(400, financialError);
   if (Buffer.byteLength(JSON.stringify(order), 'utf8') > maxJsonBytes) fail(413, 'La orden supera el tamaño permitido.');
   return order;
 }

@@ -1,7 +1,7 @@
-import { buildApprovalMessage, buildEmailDraftUrl, buildWhatsAppDraftUrl } from './approval.js';
+import { applyApprovalDecision, buildApprovalMessage, buildEmailDraftUrl, buildWhatsAppDraftUrl } from './approval.js';
 import { getPrivateEvidence, isSupabaseConfigured, supabaseRequest } from './supabase-backend.js';
 import { normalizeTechnicianNames } from './technician-roster.js';
-import { eligiblePaymentOrders, orderBalance, orderChargeTotal, orderPaidTotal, scheduledDeliveries, summarizeEarnings, validatePaymentBalance } from './finance.js';
+import { DEFAULT_DIAGNOSTIC_FEE, diagnosticFee, eligiblePaymentOrders, hasDiagnosticFee, orderBalance, orderChargeTotal, orderPaidTotal, proposedOrderTotal, repairEstimateTotal, scheduledDeliveries, summarizeEarnings, validateOrderFinancials, validatePaymentBalance } from './finance.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -251,6 +251,14 @@ function statusClass(status) {
 function approvalLabel(order) {
   return ({ not_requested: 'Sin solicitar', pending: 'Pendiente', approved: 'Aprobada', changes_requested: 'Cambios solicitados' })[order.approval_status] || 'Sin solicitar';
 }
+function quoteBreakdownRows(order) {
+  return hasDiagnosticFee(order)
+    ? [['Diagnóstico', money(diagnosticFee(order))], ['Reparación adicional propuesta', money(repairEstimateTotal(order))], ['Total propuesto', money(proposedOrderTotal(order))]]
+    : [['Estimación', money(order.estimate_total)]];
+}
+function quoteBreakdownHtml(order) {
+  return quoteBreakdownRows(order).map(([label, amount]) => `<br><b>${escapeHtml(label)}:</b> ${escapeHtml(amount)}`).join('');
+}
 function orderTitle(order) { return `${order.vehicle?.make || ''} ${order.vehicle?.model || ''}`.trim() || 'Vehículo sin identificar'; }
 function orderNumber(order) { return order.order_number || 'Sin folio'; }
 function routeOrder(id, view = 'inspection') {
@@ -318,6 +326,8 @@ const backend = {
   async saveOrder(order) {
     order.updated_at = nowIso();
     if (localMode) {
+      const financialError = validateOrderFinancials(order, payments);
+      if (financialError) throw new Error(financialError);
       const index = orders.findIndex((item) => item.id === order.id);
       if (index >= 0) orders[index] = order; else orders.unshift(order);
       writeLocal(LOCAL_ORDERS_KEY, orders);
@@ -444,7 +454,7 @@ function hideAuth() { $('#authBackdrop')?.remove(); document.body.classList.remo
 function addExtraUi() {
   const receiptActions = $('#view-reception .form-actions');
   if (receiptActions && !$('#workScope')) {
-    receiptActions.insertAdjacentHTML('beforebegin', `<section class="form-section"><div class="section-head"><h2 class="section-name">Alcance y estimación</h2><span class="section-optional">SEPARADO DE GASTOS REALES</span></div><div class="extra-fields"><div class="field"><label for="workScope">Trabajo solicitado / propuesta inicial</label><textarea id="workScope" placeholder="Describe el trabajo a revisar o cotizar"></textarea></div><div class="field"><label for="estimateTotal">Estimación (MXN)</label><input id="estimateTotal" type="number" min="0" step="0.01" placeholder="0.00" inputmode="decimal" /></div></div></section>`);
+    receiptActions.insertAdjacentHTML('beforebegin', `<section class="form-section"><div class="section-head"><h2 class="section-name">Alcance y estimación</h2><span class="section-optional">SEPARADO DE GASTOS REALES</span></div><div class="field-grid"><div class="field full"><label for="workScope">Trabajo solicitado / propuesta inicial</label><textarea id="workScope" placeholder="Describe el trabajo a revisar o cotizar"></textarea></div><div class="field"><label for="diagnosticFee">Cuota de diagnóstico (MXN)</label><input id="diagnosticFee" type="number" min="0" max="9999999999.99" step="0.01" placeholder="0.00" inputmode="decimal" /><span class="hint">En órdenes nuevas de Diagnóstico se sugiere $100.00; en expedientes existentes revisa la cuota antes de guardar.</span></div><div class="field"><label id="estimateTotalLabel" for="estimateTotal">Estimación total (MXN)</label><input id="estimateTotal" type="number" min="0" max="9999999999.99" step="0.01" placeholder="0.00" inputmode="decimal" /><span class="hint" id="estimateTotalHint">Para otros motivos, captura aquí la estimación total.</span></div><div class="hint field full" id="quoteBreakdownHint" aria-live="polite"></div></div></section>`);
   }
   const continueBtn = $$('#view-reception .form-actions .btn').find((button) => button.textContent.includes('Continuar a inspección'));
   if (continueBtn) { continueBtn.id = 'continueReceptionBtn'; continueBtn.removeAttribute('data-go'); }
@@ -460,7 +470,22 @@ function addExtraUi() {
     const banner = $('#view-home .demo-banner');
     if (banner) banner.insertAdjacentHTML('afterend', '<button type="button" class="demo-reset" id="resetTestBtn">Reiniciar la prueba y borrar lo capturado</button>');
   }
+  updateQuoteFields();
   if (!$('#expenseModal')) document.body.insertAdjacentHTML('beforeend', `<div class="modal-backdrop" id="expenseModal"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="expenseTitle"><div class="modal-head"><h2 id="expenseTitle">Registrar gasto real</h2><button class="icon-btn" type="button" id="closeExpense" aria-label="Cerrar">×</button></div><form id="expenseForm"><div class="field-grid"><div class="field"><label for="expenseDate">Fecha</label><input id="expenseDate" type="date" required /></div><div class="field"><label for="expenseCategory">Rubro</label><select id="expenseCategory" required>${CATEGORIES.map((category) => `<option>${escapeHtml(category)}</option>`).join('')}</select></div><div class="field full"><label for="expenseDescription">Descripción</label><input id="expenseDescription" maxlength="160" required placeholder="Ej. Compra de refacciones" /></div><div class="field"><label for="expenseAmount">Importe (MXN)</label><input id="expenseAmount" type="number" min="0.01" step="0.01" inputmode="decimal" required /></div><div class="field"><label for="expenseOrder">Orden relacionada</label><select id="expenseOrder"><option value="">Sin orden</option></select></div><div class="field full"><label for="expenseProof">Imagen de factura o justificante (opcional)</label><input id="expenseProof" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif,image/heic,image/heif" /><div class="hint">Una imagen de hasta 10 MB. Se guarda localmente junto con el gasto; no se envía a servicios externos.</div><div class="expense-proof-preview" id="expenseProofPreview" hidden></div></div></div><div class="modal-actions"><button class="btn btn-light" type="button" id="cancelExpense">Cancelar</button><button class="btn btn-teal" type="submit">Guardar gasto</button></div></form></div></div>`);
+}
+
+function updateQuoteFields() {
+  const diagnostic = $('#reason')?.value === 'Diagnóstico' || Number($('#diagnosticFee')?.value || 0) > 0;
+  const label = $('#estimateTotalLabel');
+  const hint = $('#estimateTotalHint');
+  const breakdown = $('#quoteBreakdownHint');
+  if (label) label.textContent = diagnostic ? 'Costo adicional de reparación (MXN)' : 'Estimación total (MXN)';
+  if (hint) hint.textContent = diagnostic
+    ? 'Este importe se suma a la cuota de diagnóstico; preséntalo al cliente antes de pedir autorización.'
+    : 'Para otros motivos, captura aquí la estimación total.';
+  if (breakdown) breakdown.textContent = diagnostic
+    ? 'Antes de aprobar, la propuesta mostrará diagnóstico + reparación. La cuota se agrega una sola vez al total; solo se autoriza la reparación tras registrar manualmente el sí del cliente.'
+    : 'La cuota de diagnóstico solo se cobra cuando aplique; los gastos del taller se capturan aparte.';
 }
 
 function setupTeamUi() {
@@ -654,9 +679,10 @@ function showView(key) {
 }
 function clearForm() {
   activeOrderId = null;
-  ['custName','custPhone','custEmail','custCity','custAddress','custNotes','plate','vin','make','model','year','color','vehicleNotes','failure','reportedIssue','odometer','physicalNotes','valuables','workScope','estimateTotal','estimatedReadyAt'].forEach((id) => { const el = $(`#${id}`); if (el) el.value = ''; });
+  ['custName','custPhone','custEmail','custCity','custAddress','custNotes','plate','vin','make','model','year','color','vehicleNotes','failure','reportedIssue','odometer','physicalNotes','valuables','workScope','diagnosticFee','estimateTotal','estimatedReadyAt'].forEach((id) => { const el = $(`#${id}`); if (el) el.value = ''; });
   $('#receivedAt').value = localDateTime();
   $('#reason').value = 'Seleccionar motivo';
+  updateQuoteFields();
   $('#technician').value = '';
   if (cloudMode) renderCloudTechnicianSelect('', '');
   $$('.fuel-option').forEach((el) => el.classList.remove('selected'));
@@ -672,12 +698,14 @@ function fillForm(order) {
     custNotes: order.customer?.notes, plate: order.vehicle?.plate, vin: order.vehicle?.vin, make: order.vehicle?.make, model: order.vehicle?.model,
     year: order.vehicle?.year, color: order.vehicle?.color, vehicleNotes: order.vehicle?.notes, failure: order.failure_summary,
     reportedIssue: order.reported_issue, odometer: order.odometer, physicalNotes: order.physical_notes,
-    valuables: order.inventory?.valuables, workScope: order.work_scope, estimateTotal: order.estimate_total,
+    valuables: order.inventory?.valuables, workScope: order.work_scope,
+    diagnosticFee: order.diagnostic_fee, estimateTotal: hasDiagnosticFee(order) ? repairEstimateTotal(order) : order.estimate_total,
     estimatedReadyAt: order.estimated_ready_at
   };
   Object.entries(fields).forEach(([id, value]) => { const el = $(`#${id}`); if (el) el.value = value ?? ''; });
   $('#receivedAt').value = localDateTime(order.received_at || new Date());
   $('#reason').value = order.reason || 'Seleccionar motivo';
+  updateQuoteFields();
   if (cloudMode) renderCloudTechnicianSelect(order.technician || '', order.technician || '');
   else $('#technician').value = order.technician || '';
   $$('.fuel-option').forEach((el) => el.classList.toggle('selected', el.textContent.trim() === order.fuel_level));
@@ -705,6 +733,9 @@ function readForm(previous = {}) {
   const technician = cloudMode
     ? clearPreviousTechnician ? '' : technicianSelect.value || technicianSelect.dataset.unlistedTechnician || ''
     : technicianSelect.value.trim();
+  const diagnostic = Math.round((Number($('#diagnosticFee').value) + Number.EPSILON) * 100) / 100 || 0;
+  const repairEstimate = Math.round((Number($('#estimateTotal').value) + Number.EPSILON) * 100) / 100 || 0;
+  const estimate = diagnostic > 0 ? diagnostic + repairEstimate : repairEstimate;
   return {
     ...previous,
     id: previous.id || uuid(), order_number: previous.order_number || nextOrderNumber(), is_demo: Boolean(previous.is_demo),
@@ -717,7 +748,10 @@ function readForm(previous = {}) {
     fuel_level: $('.fuel-option.selected')?.textContent.trim() || '', physical_notes: $('#physicalNotes').value.trim(),
     inspection: { ...(previous.inspection || {}), fluids },
     inventory: { ...(previous.inventory || {}), accessories: selectedChecks('accessoriesList'), documents: selectedChecks('documentsList'), valuables: $('#valuables').value.trim() },
-    evidence: previous.evidence || [], work_scope: $('#workScope').value.trim(), estimate_total: Number($('#estimateTotal').value) || 0,
+    evidence: previous.evidence || [], work_scope: $('#workScope').value.trim(),
+    diagnostic_fee: diagnostic, repair_estimate_total: diagnostic > 0 ? repairEstimate : 0,
+    authorized_repair_total: previous.authorized_repair_total ?? 0, estimate_total: estimate,
+    total_charge: previous.total_charge ?? (diagnostic > 0 ? diagnostic : undefined),
     status: previous.status || 'Borrador', approval_status: previous.approval_status || 'not_requested',
     approval_channel: previous.approval_channel || '', signature_provider: previous.signature_provider || '', approval_note: previous.approval_note || '', approval_recorded_at: previous.approval_recorded_at || null,
     created_at: previous.created_at || nowIso(), updated_at: nowIso()
@@ -994,7 +1028,7 @@ function renderApprovalSummary() {
   const summary = $('#view-approval .summary-list');
   if (summary) summary.innerHTML = [
     ['Folio', orderNumber(order)], ['Cliente', order.customer?.name || 'Sin nombre'], ['Vehículo', `${orderTitle(order)} · ${order.vehicle?.year || '—'}`],
-    ['Trabajo', order.work_scope || order.reason || 'Sin definir'], ['Estimación', money(order.estimate_total)], ['Canal', order.approval_channel || 'Por acordar'],
+    ['Trabajo', order.work_scope || order.reason || 'Sin definir'], ...quoteBreakdownRows(order), ['Canal', order.approval_channel || 'Por acordar'],
     ['Contacto', contact], ['Solicitud compartida', requestedAt ? fmtDate(requestedAt) : '—'], ['Respuesta recibida', respondedAt ? fmtDate(respondedAt) : '—'],
     ...(order.approval_response_note ? [['Detalle de respuesta', order.approval_response_note]] : [])
   ].map(([a, b]) => `<div class="summary-row"><span>${escapeHtml(a)}</span><b>${escapeHtml(b)}</b></div>`).join('');
@@ -1069,7 +1103,7 @@ async function openPdfOrder(id) {
   const line = (a, b) => `<div class="pdf-line"><span>${escapeHtml(a)}</span><b>${escapeHtml(b || 'Sin capturar')}</b></div>`;
   const fluidText = Object.entries(order.inspection?.fluids || {}).map(([name, value]) => `${name}: ${value}`).join(' · ') || 'Pendiente';
   const inv = order.inventory || {};
-  $('.pdf-paper').innerHTML = `<div class="pdf-top"><div><div class="pdf-brand">Taller Control</div><div class="pdf-sub">Recepción de vehículo · ${cloudMode ? 'Supabase Free en línea' : serverMode ? 'servidor SQLite del taller' : 'registro local'}</div></div><div class="pdf-folio"><strong>${escapeHtml(orderNumber(order))}</strong><span>${escapeHtml(fmtDate(order.received_at))}</span></div></div><h2 class="pdf-title">Orden de recepción y servicio</h2><div class="pdf-intro">Registro de la información proporcionada al ingreso y condición documentada del vehículo.</div><div class="preview-checks" style="margin-top:12px"><span class="badge ${order.is_demo ? 'amber' : 'green'}">${order.is_demo ? 'Prueba ficticia' : 'Registro guardado'}</span><span class="badge ${statusClass(order.status)}">${escapeHtml(order.status)}</span><span class="badge blue">Evidencia ${(order.evidence || []).length} fotos</span></div><div class="pdf-grid"><section class="pdf-box"><h3>Cliente</h3>${line('Nombre', order.customer?.name)}${line('Teléfono', order.customer?.phone)}${line('Correo electrónico', order.customer?.email)}${line('Dirección', order.customer?.address)}${line('Ciudad', order.customer?.city)}${line('Observaciones', order.customer?.notes)}</section><section class="pdf-box"><h3>Vehículo</h3>${line('Marca / modelo', orderTitle(order))}${line('Año / color', `${order.vehicle?.year || ''} · ${order.vehicle?.color || ''}`)}${line('Placas', order.vehicle?.plate)}${line('VIN', order.vehicle?.vin)}${line('Observaciones', order.vehicle?.notes)}</section><section class="pdf-box"><h3>Ingreso y lecturas</h3>${line('Motivo', order.reason)}${line('Técnico', order.technician || 'Por asignar')}${line('Kilometraje', order.odometer ? `${Number(order.odometer).toLocaleString('es-MX')} km` : '')}${line('Combustible', order.fuel_level)}</section><section class="pdf-box"><h3>Falla y condición física</h3>${line('Falla según cliente', order.reported_issue || order.failure_summary)}${line('Daños / observaciones', order.physical_notes)}</section></div><div class="pdf-notes"><b>Fluidos:</b> ${escapeHtml(fluidText)}</div><div class="pdf-notes"><b>Accesorios:</b> ${escapeHtml((inv.accessories || []).join(', ') || 'Ninguno marcado')}<br><b>Documentos:</b> ${escapeHtml((inv.documents || []).join(', ') || 'Ninguno marcado')}<br><b>Objetos declarados:</b> ${escapeHtml(inv.valuables || 'Sin declarar')}<br><b>Trabajo propuesto:</b> ${escapeHtml(order.work_scope || 'Sin definir')}<br><b>Estimación:</b> ${escapeHtml(money(order.estimate_total))}</div>${evidenceMarkup ? `<div class="print-evidence">${evidenceMarkup}</div>` : '<div class="pdf-notes"><b>Evidencia fotográfica:</b> No se adjuntaron fotografías.</div>'}<div class="pdf-signatures"><div class="signature">Entrega del vehículo · nombre y firma</div><div class="signature">Recepción en taller · nombre y firma</div></div><div class="pdf-disclaimer">Formato de control interno. Las firmas impresas requieren firma manuscrita; el registro digital no representa una firma electrónica ni una aprobación del cliente.</div>`;
+  $('.pdf-paper').innerHTML = `<div class="pdf-top"><div><div class="pdf-brand">Taller Control</div><div class="pdf-sub">Recepción de vehículo · ${cloudMode ? 'Supabase Free en línea' : serverMode ? 'servidor SQLite del taller' : 'registro local'}</div></div><div class="pdf-folio"><strong>${escapeHtml(orderNumber(order))}</strong><span>${escapeHtml(fmtDate(order.received_at))}</span></div></div><h2 class="pdf-title">Orden de recepción y servicio</h2><div class="pdf-intro">Registro de la información proporcionada al ingreso y condición documentada del vehículo.</div><div class="preview-checks" style="margin-top:12px"><span class="badge ${order.is_demo ? 'amber' : 'green'}">${order.is_demo ? 'Prueba ficticia' : 'Registro guardado'}</span><span class="badge ${statusClass(order.status)}">${escapeHtml(order.status)}</span><span class="badge blue">Evidencia ${(order.evidence || []).length} fotos</span></div><div class="pdf-grid"><section class="pdf-box"><h3>Cliente</h3>${line('Nombre', order.customer?.name)}${line('Teléfono', order.customer?.phone)}${line('Correo electrónico', order.customer?.email)}${line('Dirección', order.customer?.address)}${line('Ciudad', order.customer?.city)}${line('Observaciones', order.customer?.notes)}</section><section class="pdf-box"><h3>Vehículo</h3>${line('Marca / modelo', orderTitle(order))}${line('Año / color', `${order.vehicle?.year || ''} · ${order.vehicle?.color || ''}`)}${line('Placas', order.vehicle?.plate)}${line('VIN', order.vehicle?.vin)}${line('Observaciones', order.vehicle?.notes)}</section><section class="pdf-box"><h3>Ingreso y lecturas</h3>${line('Motivo', order.reason)}${line('Técnico', order.technician || 'Por asignar')}${line('Kilometraje', order.odometer ? `${Number(order.odometer).toLocaleString('es-MX')} km` : '')}${line('Combustible', order.fuel_level)}</section><section class="pdf-box"><h3>Falla y condición física</h3>${line('Falla según cliente', order.reported_issue || order.failure_summary)}${line('Daños / observaciones', order.physical_notes)}</section></div><div class="pdf-notes"><b>Fluidos:</b> ${escapeHtml(fluidText)}</div><div class="pdf-notes"><b>Accesorios:</b> ${escapeHtml((inv.accessories || []).join(', ') || 'Ninguno marcado')}<br><b>Documentos:</b> ${escapeHtml((inv.documents || []).join(', ') || 'Ninguno marcado')}<br><b>Objetos declarados:</b> ${escapeHtml(inv.valuables || 'Sin declarar')}<br><b>Trabajo propuesto:</b> ${escapeHtml(order.work_scope || 'Sin definir')}${quoteBreakdownHtml(order)}</div>${evidenceMarkup ? `<div class="print-evidence">${evidenceMarkup}</div>` : '<div class="pdf-notes"><b>Evidencia fotográfica:</b> No se adjuntaron fotografías.</div>'}<div class="pdf-signatures"><div class="signature">Entrega del vehículo · nombre y firma</div><div class="signature">Recepción en taller · nombre y firma</div></div><div class="pdf-disclaimer">Formato de control interno. Las firmas impresas requieren firma manuscrita; el registro digital no representa una firma electrónica ni una aprobación del cliente.</div>`;
   $('#orderList').style.display = 'none'; $('#printArea').style.display = 'block';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -1192,10 +1226,14 @@ function updatePaymentBalanceHint() {
   if (!order) {
     hint.textContent = 'Selecciona una orden para consultar su saldo.';
     hint.classList.remove('balance-error');
+    totalInput.readOnly = false;
     if (button) button.disabled = true;
     return;
   }
-  const total = Number(totalInput.value) || 0;
+  const diagnosticOrder = hasDiagnosticFee(order);
+  totalInput.readOnly = diagnosticOrder;
+  if (diagnosticOrder) totalInput.value = String(orderChargeTotal(order));
+  const total = diagnosticOrder ? orderChargeTotal(order) : Number(totalInput.value) || 0;
   const paid = orderPaidTotal(order.id, payments);
   const balance = Math.max(0, Math.round((total - paid + Number.EPSILON) * 100) / 100);
   const amount = Number(amountInput.value) || 0;
@@ -1213,7 +1251,8 @@ function openPaymentModal(orderId = '') {
   const defaultOrder = eligible.find((order) => orderBalance(order, payments) > 0) || eligible[0];
   renderPaymentOrderOptions(orderId || defaultOrder.id);
   const order = orderById($('#paymentOrder').value);
-  $('#paymentTotal').value = order ? Number(order.total_charge ?? order.estimate_total ?? 0) || '' : '';
+  $('#paymentTotal').value = order ? orderChargeTotal(order) || '' : '';
+  $('#paymentTotal').readOnly = Boolean(order && hasDiagnosticFee(order));
   $('#paymentAmount').value = '';
   updatePaymentBalanceHint();
   $('#paymentModal').classList.add('open');
@@ -1233,6 +1272,10 @@ async function savePayment(event) {
     method: $('#paymentMethod').value, reference: $('#paymentReference').value.trim()
   };
   const currentTotal = orderChargeTotal(order);
+  if (hasDiagnosticFee(order) && total !== currentTotal) {
+    notify('El total de diagnóstico y reparación solo cambia al registrar la autorización manual del cliente.');
+    updatePaymentBalanceHint(); return;
+  }
   const orderWithTotal = total !== currentTotal ? { ...order, total_charge: total, updated_at: nowIso() } : order;
   const validationError = validatePaymentBalance(payment, orderWithTotal, payments);
   if (validationError) { notify(validationError); updatePaymentBalanceHint(); return; }
@@ -1429,13 +1472,17 @@ async function openApprovalRequest() {
 async function recordDecision(approved) {
   const order = orderById(approvalOrderId);
   if (!order || order.approval_status !== 'pending') { notify('No hay una solicitud pendiente para actualizar.'); return; }
-  order.approval_status = approved ? 'approved' : 'changes_requested';
-  order.approval_responded_at = nowIso(); order.approval_recorded_at = order.approval_responded_at;
-  order.approval_response_note = $('#approvalResponseNote').value.trim();
-  order.status = approved ? 'En servicio' : 'Aprobación';
+  const respondedAt = nowIso();
+  const updated = {
+    ...applyApprovalDecision(order, approved),
+    approval_responded_at: respondedAt, approval_recorded_at: respondedAt,
+    approval_response_note: $('#approvalResponseNote').value.trim()
+  };
+  const financialError = validateOrderFinancials(updated, payments);
+  if (financialError) { notify(financialError); return; }
   try {
-    await backend.saveOrder(order);
-    await backend.logEvent(order, approved ? 'approval_recorded' : 'changes_recorded', { channel: order.approval_channel, request_note: order.approval_note, response_note: order.approval_response_note });
+    await backend.saveOrder(updated);
+    await backend.logEvent(updated, approved ? 'approval_recorded' : 'changes_recorded', { channel: updated.approval_channel, request_note: updated.approval_note, response_note: updated.approval_response_note });
     renderAll(); renderApprovalSummary();
     $('#modalText').textContent = approved ? 'Se registró internamente que el cliente aprobó. Esto no constituye una firma electrónica ni prueba de identidad.' : 'Se registró internamente que el cliente pidió cambios. Revisa la propuesta antes de volver a compartirla.';
     notify(approved ? 'Respuesta de aprobación registrada en la orden.' : 'Solicitud de cambios registrada en la orden.');
@@ -1470,6 +1517,13 @@ function registerEvents() {
   $('#saveDraftBtn')?.addEventListener('click', () => saveReception('draft'));
   $('#continueReceptionBtn')?.addEventListener('click', async () => { const order = await saveReception('inspection'); if (order) showView('inspection'); });
   $('#reviewOrderBtn')?.addEventListener('click', reviewOrder);
+  $('#reason')?.addEventListener('change', () => {
+    if ($('#reason').value === 'Diagnóstico' && !$('#diagnosticFee').value && !activeOrderId) {
+      $('#diagnosticFee').value = String(DEFAULT_DIAGNOSTIC_FEE);
+    }
+    updateQuoteFields();
+  });
+  $('#diagnosticFee')?.addEventListener('input', updateQuoteFields);
   $('#backToOrders')?.addEventListener('click', () => { $('#printArea').style.display = 'none'; $('#orderList').style.display = 'block'; });
   $('#printBtn')?.addEventListener('click', () => window.print());
   $('#photoAddBtn')?.addEventListener('click', () => $('#photoInput').click());
@@ -1498,7 +1552,8 @@ function registerEvents() {
   $('#paymentModal')?.addEventListener('click', (event) => { if (event.target === $('#paymentModal')) closePaymentModal(); });
   $('#paymentOrder')?.addEventListener('change', () => {
     const order = orderById($('#paymentOrder').value);
-    $('#paymentTotal').value = order ? Number(order.total_charge ?? order.estimate_total ?? 0) || '' : '';
+    $('#paymentTotal').value = order ? orderChargeTotal(order) || '' : '';
+    $('#paymentTotal').readOnly = Boolean(order && hasDiagnosticFee(order));
     updatePaymentBalanceHint();
   });
   ['paymentAmount', 'paymentTotal'].forEach((id) => $(`#${id}`)?.addEventListener('input', updatePaymentBalanceHint));

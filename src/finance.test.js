@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  orderBalance, orderChargeTotal, orderPaidTotal, scheduledDeliveries,
-  summarizeEarnings, validatePaymentBalance
+  hasDiagnosticFee, orderBalance, orderChargeTotal, orderPaidTotal, proposedOrderTotal,
+  repairEstimateTotal, scheduledDeliveries, summarizeEarnings, validateOrderFinancials,
+  validatePaymentBalance
 } from './finance.js';
 
 const order = (overrides = {}) => ({
@@ -20,6 +21,50 @@ test('calcula cobros y saldo usando centavos y el total final antes de la estima
   assert.equal(orderPaidTotal('order-0001', payments), 100);
   assert.equal(orderBalance(order({ total_charge: 400 }), payments), 300);
   assert.equal(orderBalance(order({ total_charge: 100 }), [payment({ amount: 100.005 })]), 0);
+});
+
+test('la cuota de diagnóstico se conserva en $100 y la reparación autorizada se suma solo una vez', async () => {
+  const { applyApprovalDecision } = await import('./approval.js');
+  const diagnosis = order({ status: 'Aprobación', diagnostic_fee: 100, repair_estimate_total: 850, authorized_repair_total: 0, estimate_total: 950, total_charge: 100 });
+  const diagnosticPayment = payment({ amount: 100 });
+  assert.equal(hasDiagnosticFee(diagnosis), true);
+  assert.equal(repairEstimateTotal(diagnosis), 850);
+  assert.equal(proposedOrderTotal(diagnosis), 950);
+  assert.equal(orderChargeTotal(diagnosis), 100);
+  assert.equal(orderBalance(diagnosis, [diagnosticPayment]), 0);
+  const approved = applyApprovalDecision(diagnosis, true);
+  assert.equal(approved.status, 'En servicio');
+  assert.equal(approved.total_charge, 950);
+  assert.equal(orderPaidTotal(approved.id, [diagnosticPayment]), 100);
+  assert.equal(orderBalance(approved, [diagnosticPayment]), 850);
+  const earnings = summarizeEarnings({
+    orders: [approved], payments: [diagnosticPayment], expenses: [{ amount: 25 }], now: new Date(2026, 10, 11)
+  });
+  assert.deepEqual(earnings, { totalCollected: 100, collectedThisMonth: 100, receivable: 850, totalExpenses: 25, cashNet: 75 });
+  const repeated = applyApprovalDecision(approved, true);
+  assert.equal(repeated.total_charge, 950);
+  assert.equal(orderBalance(repeated, [diagnosticPayment]), 850);
+  const decimalQuote = applyApprovalDecision(order({
+    status: 'Aprobación', diagnostic_fee: 100.5, repair_estimate_total: 349.25,
+    authorized_repair_total: 0, estimate_total: 449.75, total_charge: 100.5
+  }), true);
+  assert.equal(decimalQuote.total_charge, 449.75);
+  assert.equal(orderBalance(decimalQuote, [payment({ amount: 100.5 })]), 349.25);
+});
+
+test('rechazo no autoriza extras y los guardas de orden evitan importes inconsistentes o menores que los pagos', async () => {
+  const { applyApprovalDecision } = await import('./approval.js');
+  const diagnosis = order({ status: 'Aprobación', diagnostic_fee: 100, repair_estimate_total: 250, authorized_repair_total: 0, estimate_total: 350, total_charge: 100 });
+  const rejected = applyApprovalDecision(diagnosis, false);
+  assert.equal(rejected.status, 'Aprobación');
+  assert.equal(rejected.total_charge, 100);
+  assert.equal(rejected.authorized_repair_total, 0);
+  assert.equal(validateOrderFinancials(rejected, [payment({ amount: 100 })]), '');
+  assert.match(validateOrderFinancials(diagnosis, [payment({ amount: 100.01 })]), /menor que los 100\.01 MXN ya abonados/);
+  assert.match(validateOrderFinancials({ ...diagnosis, total_charge: 99 }, []), /total vigente/);
+  assert.match(validateOrderFinancials({ ...diagnosis, repair_estimate_total: -1 }, []), /Importe de reparación/);
+  assert.match(validateOrderFinancials({ ...diagnosis, estimate_total: 351 }, []), /debe ser igual/);
+  assert.match(validatePaymentBalance(payment({ amount: 100.01 }), diagnosis, []), /supera el saldo/);
 });
 
 test('resumen diferencia cobros del mes, saldo y neto de caja', () => {
