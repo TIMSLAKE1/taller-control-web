@@ -1,4 +1,5 @@
 import { buildApprovalMessage, buildEmailDraftUrl, buildWhatsAppDraftUrl } from './approval.js';
+import { getPrivateEvidence, isSupabaseConfigured, registerInitialAccount, supabaseRequest } from './supabase-backend.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -19,7 +20,9 @@ const fmtDate = (value, options = { dateStyle: 'medium', timeStyle: 'short' }) =
 const publicDemoBuild = import.meta.env.MODE === 'public-demo';
 const cleanTestBuild = import.meta.env.MODE === 'clean-test';
 const localMode = publicDemoBuild || cleanTestBuild;
-const serverMode = !localMode;
+const cloudMode = import.meta.env.MODE === 'cloud';
+const serverMode = !localMode && !cloudMode;
+const hostedMode = serverMode || cloudMode;
 const STORAGE_PREFIX = publicDemoBuild ? 'taller-control.demo' : cleanTestBuild ? 'taller-control.clean-test' : 'taller-control';
 const LOCAL_ORDERS_KEY = `${STORAGE_PREFIX}.orders.v1`;
 const LOCAL_EXPENSES_KEY = `${STORAGE_PREFIX}.expenses.v1`;
@@ -42,6 +45,7 @@ let approvalOrderId = null;
 let printOrderId = null;
 let toastTimer = null;
 let refreshTimer = null;
+let lastCloudUsageRefresh = 0;
 let installPrompt = null;
 let photoDbPromise = null;
 let photoUrls = [];
@@ -111,7 +115,7 @@ async function deleteLocalPhoto(key) {
 }
 
 function lockExpiredSession() {
-  if (!serverMode || !user) return;
+  if (!hostedMode || !user) return;
   user = null;
   clearInterval(refreshTimer);
   showAuth('signin');
@@ -129,6 +133,7 @@ async function serverRequest(url, options = {}) {
     headers.set('Content-Type', body.type || 'application/octet-stream');
     if (body.name) headers.set('X-File-Name', body.name);
   }
+  if (cloudMode) return supabaseRequest(url, { ...options, headers, body });
   const response = await fetch(url, { ...options, headers, body, credentials: 'same-origin', cache: 'no-store' });
   const result = response.status === 204 ? null : await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -141,14 +146,15 @@ async function serverRequest(url, options = {}) {
 }
 
 function startServerRefresh() {
-  if (!serverMode || !user) return;
+  if (!hostedMode || !user) return;
   clearInterval(refreshTimer);
   refreshTimer = setInterval(async () => {
     if (document.hidden || !user) return;
     try {
       const data = await serverRequest('/api/data');
       orders = data.orders || []; expenses = data.expenses || [];
-      setConnection('Servidor SQLite', 'server'); renderAll();
+      setConnection(cloudMode ? 'Supabase Free' : 'Servidor SQLite', cloudMode ? 'cloud' : 'server'); renderAll();
+      if (cloudMode) refreshCloudUsage();
     } catch (error) {
       if (error.status !== 401) setConnection('Sin conexión', 'offline');
     }
@@ -160,7 +166,28 @@ function setConnection(label, type) {
   if (!el) return;
   el.textContent = label;
   el.className = `badge gray connection-indicator ${type}`;
-  el.title = type === 'local' ? 'Los cambios se guardan en este navegador.' : type === 'server' ? 'Sesión autenticada; los cambios se guardan en la base SQLite del servidor local.' : 'No hay conexión disponible.';
+  el.title = type === 'local' ? 'Los cambios se guardan en este navegador.' : type === 'server' ? 'Sesión autenticada; los cambios se guardan en la base SQLite del servidor local.' : type === 'cloud' ? 'Sesión autorizada; los datos y evidencia se guardan en Supabase Free con RLS.' : 'No hay conexión disponible.';
+}
+async function refreshCloudUsage(force = false) {
+  if (!cloudMode) return;
+  const notice = $('#cloudUsageNotice');
+  if (!notice) return;
+  const now = Date.now();
+  if (!force && now - lastCloudUsageRefresh < 5 * 60 * 1000) return;
+  lastCloudUsageRefresh = now;
+  try {
+    const usage = await supabaseRequest('/api/storage-usage');
+    const used = Math.max(0, Number(usage.used_bytes || 0));
+    const limit = Math.max(1, Number(usage.limit_bytes || 700 * 1024 * 1024));
+    const percent = Math.min(100, Math.floor(used / limit * 100));
+    const usedMb = (used / 1024 / 1024).toFixed(1);
+    const limitMb = (limit / 1024 / 1024).toFixed(0);
+    const warning = percent >= 70;
+    notice.innerHTML = `<strong>${warning ? 'Aviso de almacenamiento:' : 'Uso de evidencia privada:'}</strong> ${usedMb} MB de ${limitMb} MB (${percent}%). ${warning ? 'Se acerca el tope interno; al llegar al 100% se rechazarán nuevas evidencias.' : 'Límite preventivo propio de la app.'} No es una alerta de facturación ni mide el uso total del proveedor.`;
+    notice.closest('.demo-banner')?.classList.toggle('cloud-quota-warning', warning);
+  } catch (error) {
+    notice.textContent = `No se pudo consultar el uso de evidencia: ${error.message}. Revisa manualmente las cuotas en Supabase.`;
+  }
 }
 function notify(message) {
   const toast = $('#toast');
@@ -171,15 +198,15 @@ function notify(message) {
   toastTimer = setTimeout(() => toast.classList.remove('show'), 3600);
 }
 function setProfile() {
-  const name = serverMode && user ? (user.display_name || user.email) : localMode && !publicDemoBuild ? localTeamName : 'Equipo de taller';
-  const role = serverMode ? (user ? (user.role === 'manager' ? (user.is_technician ? 'Encargado · Técnico autorizado' : 'Encargado') : 'Técnico mecánico · SQLite local') : 'Sesión cerrada') : publicDemoBuild ? 'Demo ficticia' : 'Prueba limpia · este dispositivo';
+  const name = hostedMode && user ? (user.display_name || user.email) : localMode && !publicDemoBuild ? localTeamName : 'Equipo de taller';
+  const role = hostedMode ? (user ? (user.role === 'manager' ? 'Encargado · Técnico autorizado' : cloudMode ? 'Técnico mecánico · Supabase Free' : 'Técnico mecánico · SQLite local') : 'Sesión cerrada') : publicDemoBuild ? 'Demo ficticia' : 'Prueba limpia · este dispositivo';
   const nameEl = $('.profile-name');
   const roleEl = $('.profile-role');
   if (nameEl) nameEl.textContent = name;
   if (roleEl) roleEl.textContent = role;
   const teamButton = $('#openTeamBtn');
   if (teamButton) {
-    const canManageUsers = serverMode && user?.role === 'manager';
+    const canManageUsers = hostedMode && user?.role === 'manager';
     const canManageLocalTeam = localMode && !publicDemoBuild;
     teamButton.disabled = !canManageUsers && !canManageLocalTeam;
     teamButton.title = canManageUsers ? 'Administrar cuentas autorizadas del taller' : canManageLocalTeam ? 'Administrar sugerencias locales de equipo' : 'La administración solo está disponible para el encargado del taller.';
@@ -192,7 +219,7 @@ function setProfile() {
     tools.innerHTML = '<button type="button" id="signOutBtn">Cerrar sesión</button>';
     bottom.append(tools);
     $('#signOutBtn').addEventListener('click', async () => {
-      if (serverMode) await serverRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
+      if (hostedMode) await serverRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
       window.location.reload();
     });
   }
@@ -242,7 +269,8 @@ const backend = {
       return false;
     }
     await this.loadData();
-    setConnection('Servidor SQLite', 'server');
+    setConnection(cloudMode ? 'Supabase Free' : 'Servidor SQLite', cloudMode ? 'cloud' : 'server');
+    if (cloudMode) await refreshCloudUsage(true);
     setProfile();
     hideAuth();
     return true;
@@ -330,7 +358,8 @@ const backend = {
 };
 
 function showAuth(mode) {
-  if (serverMode) document.body.classList.add('server-locked');
+  const registering = cloudMode && mode === 'register';
+  if (hostedMode) document.body.classList.add('server-locked');
   let backdrop = $('#authBackdrop');
   if (!backdrop) {
     backdrop = document.createElement('div');
@@ -339,26 +368,58 @@ function showAuth(mode) {
   }
   backdrop.setAttribute('role', 'dialog');
   backdrop.setAttribute('aria-modal', 'true');
-  backdrop.innerHTML = `<section class="auth-panel"><div class="eyebrow"><span class="dot"></span>Acceso al taller · red local</div><h2>Iniciar sesión</h2><p class="intro">Acceso reservado al encargado y a técnicos con cuenta autorizada. No hay registro abierto; solicita acceso al encargado del taller.</p><form id="localAuthForm"><div class="field"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" autocomplete="username" required /></div><div class="field"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" autocomplete="current-password" required /></div><div class="auth-actions"><button class="btn" id="authSubmit" type="submit">Entrar</button></div><div id="authMessage" class="auth-error" role="status" aria-live="polite"></div></form></section>`;
+  const intro = cloudMode
+    ? registering
+      ? 'El registro no concede acceso por sí solo. Solo el correo propietario configurado puede activar al primer encargado; las cuentas de técnicos se autorizan mediante invitación.'
+      : 'Acceso reservado al encargado y a técnicos autorizados. No hay acceso abierto a órdenes, gastos ni evidencia.'
+    : 'Acceso reservado al encargado y a técnicos con cuenta autorizada. No hay registro abierto; solicita acceso al encargado del taller.';
+  const fields = registering
+    ? `<div class="field"><label for="authDisplayName">Nombre</label><input id="authDisplayName" autocomplete="name" maxlength="100" required /></div><div class="field"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" autocomplete="username" required /></div><div class="field"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" autocomplete="new-password" minlength="12" maxlength="200" required /><div class="hint">Al menos 12 caracteres.</div></div><div class="field"><label for="authPasswordAgain">Confirmar contraseña</label><input id="authPasswordAgain" type="password" autocomplete="new-password" minlength="12" maxlength="200" required /></div>`
+    : `<div class="field"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" autocomplete="username" required /></div><div class="field"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" autocomplete="current-password" required /></div>`;
+  backdrop.innerHTML = `<section class="auth-panel"><div class="eyebrow"><span class="dot"></span>${cloudMode ? 'Acceso seguro · Supabase Free' : 'Acceso al taller · red local'}</div><h2>${registering ? 'Crear cuenta inicial' : 'Iniciar sesión'}</h2><p class="intro">${intro}</p><form id="localAuthForm">${fields}<div class="auth-actions"><button class="btn" id="authSubmit" type="submit">${registering ? 'Crear cuenta' : 'Entrar'}</button>${cloudMode ? `<button class="text-btn" type="button" id="toggleAuthMode">${registering ? 'Volver al acceso' : 'Crear cuenta inicial'}</button>` : ''}</div><div id="authMessage" class="auth-error" role="status" aria-live="polite"></div></form></section>`;
   $('#localAuthForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const message = $('#authMessage');
-    const email = $('#authEmail').value.trim(); const password = $('#authPassword').value;
+    const email = $('#authEmail').value.trim();
+    const password = $('#authPassword').value;
     const button = $('#authSubmit');
+    if (registering) {
+      if (password !== $('#authPasswordAgain').value) {
+        message.className = 'auth-error'; message.textContent = 'Las contraseñas no coinciden.'; return;
+      }
+      button.disabled = true;
+      message.className = 'auth-success'; message.textContent = 'Creando cuenta…';
+      try {
+        const result = await registerInitialAccount({ email, password, display_name: $('#authDisplayName').value.trim() });
+        showAuth('signin');
+        $('#authEmail').value = email;
+        const status = $('#authMessage');
+        status.className = 'auth-success';
+        status.textContent = result.confirmation_required
+          ? 'Cuenta creada. Confirma el correo recibido y después inicia sesión; el encargado inicial se habilita solo para el correo propietario configurado.'
+          : 'Cuenta creada. Inicia sesión; el encargado inicial se habilita solo para el correo propietario configurado.';
+      } catch (error) {
+        message.className = 'auth-error'; message.textContent = error.message || 'No se pudo crear la cuenta.';
+        button.disabled = false;
+      }
+      return;
+    }
     button.disabled = true;
     message.className = 'auth-success'; message.textContent = 'Conectando…';
     try {
       const result = await serverRequest('/api/auth/login', { method: 'POST', body: { email, password } });
       user = result.user;
       await backend.loadData();
-      setConnection('Servidor SQLite', 'server');
+      setConnection(cloudMode ? 'Supabase Free' : 'Servidor SQLite', cloudMode ? 'cloud' : 'server');
       setProfile(); hideAuth(); renderAll();
       startServerRefresh();
+      if (cloudMode) refreshCloudUsage(true);
       if (orders.length) fillForm(orders[0]); else clearForm();
       showView('home'); notify('Sesión iniciada.');
     } catch (error) { message.className = 'auth-error'; message.textContent = error.message || 'No se pudo iniciar sesión.'; }
     finally { button.disabled = false; }
   });
+  $('#toggleAuthMode')?.addEventListener('click', () => showAuth(registering ? 'signin' : 'register'));
 }
 function hideAuth() { $('#authBackdrop')?.remove(); document.body.classList.remove('server-locked'); }
 
@@ -426,7 +487,7 @@ async function refreshAuthorizedUsers() {
 }
 
 async function openUserAdminModal() {
-  if (!serverMode || user?.role !== 'manager') return;
+  if (!hostedMode || user?.role !== 'manager') return;
   $('#userAdminModal').classList.add('open');
   $('#userAdminMessage').className = 'auth-success';
   $('#userAdminMessage').textContent = 'Cargando cuentas…';
@@ -891,7 +952,7 @@ async function openPdfOrder(id) {
   const line = (a, b) => `<div class="pdf-line"><span>${escapeHtml(a)}</span><b>${escapeHtml(b || 'Sin capturar')}</b></div>`;
   const fluidText = Object.entries(order.inspection?.fluids || {}).map(([name, value]) => `${name}: ${value}`).join(' · ') || 'Pendiente';
   const inv = order.inventory || {};
-  $('.pdf-paper').innerHTML = `<div class="pdf-top"><div><div class="pdf-brand">Taller Control</div><div class="pdf-sub">Recepción de vehículo · ${serverMode ? 'servidor SQLite del taller' : 'registro local'}</div></div><div class="pdf-folio"><strong>${escapeHtml(orderNumber(order))}</strong><span>${escapeHtml(fmtDate(order.received_at))}</span></div></div><h2 class="pdf-title">Orden de recepción y servicio</h2><div class="pdf-intro">Registro de la información proporcionada al ingreso y condición documentada del vehículo.</div><div class="preview-checks" style="margin-top:12px"><span class="badge ${order.is_demo ? 'amber' : 'green'}">${order.is_demo ? 'Prueba ficticia' : 'Registro guardado'}</span><span class="badge ${statusClass(order.status)}">${escapeHtml(order.status)}</span><span class="badge blue">Evidencia ${(order.evidence || []).length} fotos</span></div><div class="pdf-grid"><section class="pdf-box"><h3>Cliente</h3>${line('Nombre', order.customer?.name)}${line('Teléfono', order.customer?.phone)}${line('Correo electrónico', order.customer?.email)}${line('Dirección', order.customer?.address)}${line('Ciudad', order.customer?.city)}${line('Observaciones', order.customer?.notes)}</section><section class="pdf-box"><h3>Vehículo</h3>${line('Marca / modelo', orderTitle(order))}${line('Año / color', `${order.vehicle?.year || ''} · ${order.vehicle?.color || ''}`)}${line('Placas', order.vehicle?.plate)}${line('VIN', order.vehicle?.vin)}${line('Observaciones', order.vehicle?.notes)}</section><section class="pdf-box"><h3>Ingreso y lecturas</h3>${line('Motivo', order.reason)}${line('Técnico', order.technician || 'Por asignar')}${line('Kilometraje', order.odometer ? `${Number(order.odometer).toLocaleString('es-MX')} km` : '')}${line('Combustible', order.fuel_level)}</section><section class="pdf-box"><h3>Falla y condición física</h3>${line('Falla según cliente', order.reported_issue || order.failure_summary)}${line('Daños / observaciones', order.physical_notes)}</section></div><div class="pdf-notes"><b>Fluidos:</b> ${escapeHtml(fluidText)}</div><div class="pdf-notes"><b>Accesorios:</b> ${escapeHtml((inv.accessories || []).join(', ') || 'Ninguno marcado')}<br><b>Documentos:</b> ${escapeHtml((inv.documents || []).join(', ') || 'Ninguno marcado')}<br><b>Objetos declarados:</b> ${escapeHtml(inv.valuables || 'Sin declarar')}<br><b>Trabajo propuesto:</b> ${escapeHtml(order.work_scope || 'Sin definir')}<br><b>Estimación:</b> ${escapeHtml(money(order.estimate_total))}</div>${evidenceMarkup ? `<div class="print-evidence">${evidenceMarkup}</div>` : '<div class="pdf-notes"><b>Evidencia fotográfica:</b> No se adjuntaron fotografías.</div>'}<div class="pdf-signatures"><div class="signature">Entrega del vehículo · nombre y firma</div><div class="signature">Recepción en taller · nombre y firma</div></div><div class="pdf-disclaimer">Formato de control interno. Las firmas impresas requieren firma manuscrita; el registro digital no representa una firma electrónica ni una aprobación del cliente.</div>`;
+  $('.pdf-paper').innerHTML = `<div class="pdf-top"><div><div class="pdf-brand">Taller Control</div><div class="pdf-sub">Recepción de vehículo · ${cloudMode ? 'Supabase Free en línea' : serverMode ? 'servidor SQLite del taller' : 'registro local'}</div></div><div class="pdf-folio"><strong>${escapeHtml(orderNumber(order))}</strong><span>${escapeHtml(fmtDate(order.received_at))}</span></div></div><h2 class="pdf-title">Orden de recepción y servicio</h2><div class="pdf-intro">Registro de la información proporcionada al ingreso y condición documentada del vehículo.</div><div class="preview-checks" style="margin-top:12px"><span class="badge ${order.is_demo ? 'amber' : 'green'}">${order.is_demo ? 'Prueba ficticia' : 'Registro guardado'}</span><span class="badge ${statusClass(order.status)}">${escapeHtml(order.status)}</span><span class="badge blue">Evidencia ${(order.evidence || []).length} fotos</span></div><div class="pdf-grid"><section class="pdf-box"><h3>Cliente</h3>${line('Nombre', order.customer?.name)}${line('Teléfono', order.customer?.phone)}${line('Correo electrónico', order.customer?.email)}${line('Dirección', order.customer?.address)}${line('Ciudad', order.customer?.city)}${line('Observaciones', order.customer?.notes)}</section><section class="pdf-box"><h3>Vehículo</h3>${line('Marca / modelo', orderTitle(order))}${line('Año / color', `${order.vehicle?.year || ''} · ${order.vehicle?.color || ''}`)}${line('Placas', order.vehicle?.plate)}${line('VIN', order.vehicle?.vin)}${line('Observaciones', order.vehicle?.notes)}</section><section class="pdf-box"><h3>Ingreso y lecturas</h3>${line('Motivo', order.reason)}${line('Técnico', order.technician || 'Por asignar')}${line('Kilometraje', order.odometer ? `${Number(order.odometer).toLocaleString('es-MX')} km` : '')}${line('Combustible', order.fuel_level)}</section><section class="pdf-box"><h3>Falla y condición física</h3>${line('Falla según cliente', order.reported_issue || order.failure_summary)}${line('Daños / observaciones', order.physical_notes)}</section></div><div class="pdf-notes"><b>Fluidos:</b> ${escapeHtml(fluidText)}</div><div class="pdf-notes"><b>Accesorios:</b> ${escapeHtml((inv.accessories || []).join(', ') || 'Ninguno marcado')}<br><b>Documentos:</b> ${escapeHtml((inv.documents || []).join(', ') || 'Ninguno marcado')}<br><b>Objetos declarados:</b> ${escapeHtml(inv.valuables || 'Sin declarar')}<br><b>Trabajo propuesto:</b> ${escapeHtml(order.work_scope || 'Sin definir')}<br><b>Estimación:</b> ${escapeHtml(money(order.estimate_total))}</div>${evidenceMarkup ? `<div class="print-evidence">${evidenceMarkup}</div>` : '<div class="pdf-notes"><b>Evidencia fotográfica:</b> No se adjuntaron fotografías.</div>'}<div class="pdf-signatures"><div class="signature">Entrega del vehículo · nombre y firma</div><div class="signature">Recepción en taller · nombre y firma</div></div><div class="pdf-disclaimer">Formato de control interno. Las firmas impresas requieren firma manuscrita; el registro digital no representa una firma electrónica ni una aprobación del cliente.</div>`;
   $('#orderList').style.display = 'none'; $('#printArea').style.display = 'block';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -917,6 +978,7 @@ async function photoUrl(photo) {
     const blob = await getLocalPhoto(photo.localKey);
     return blob ? URL.createObjectURL(blob) : '';
   }
+  if (photo.photoId && cloudMode) return URL.createObjectURL(await getPrivateEvidence('order', photo.photoId));
   if (photo.photoId && serverMode) return `/api/evidence/${encodeURIComponent(photo.photoId)}`;
   return '';
 }
@@ -933,6 +995,7 @@ async function addPhotos(files) {
   if (!selected.length) { notify('Se aceptan imágenes; máximo 6 fotos por orden.'); return; }
   try {
     for (const file of selected) await backend.uploadPhoto(order, file);
+    if (cloudMode) refreshCloudUsage(true);
     renderAll(); await renderPhotoGrid(order); notify(`${selected.length} foto(s) guardada(s).`);
   } catch (error) { notify(`No se pudo guardar la foto: ${error.message}`); }
   $('#photoInput').value = '';
@@ -984,9 +1047,15 @@ async function openExpenseProof(id) {
   if (expense.proof.localKey) {
     const blob = await getLocalPhoto(expense.proof.localKey);
     if (blob) url = URL.createObjectURL(blob);
+  } else if (expense.proof.photoId && cloudMode) {
+    const tab = window.open('about:blank', '_blank');
+    try { url = URL.createObjectURL(await getPrivateEvidence('expense', expense.proof.photoId)); }
+    catch (error) { tab?.close(); notify(`No se pudo abrir el comprobante: ${error.message}`); return; }
+    if (tab) { tab.opener = null; tab.location.href = url; setTimeout(() => URL.revokeObjectURL(url), 60_000); }
+    else window.open(url, '_blank', 'noopener,noreferrer');
   } else if (expense.proof.photoId && serverMode) url = `/api/expense-proofs/${encodeURIComponent(expense.proof.photoId)}`;
   if (!url) { notify('No se encontró la imagen guardada.'); return; }
-  window.open(url, '_blank', 'noopener,noreferrer');
+  if (!cloudMode || expense.proof.localKey) window.open(url, '_blank', 'noopener,noreferrer');
   notify('Imagen del comprobante abierta en otra pestaña.');
 }
 async function attachExpenseProof(file) {
@@ -995,6 +1064,7 @@ async function attachExpenseProof(file) {
   if (!file || !expense) return;
   try {
     await backend.uploadExpenseProof(expense, file);
+    if (cloudMode) refreshCloudUsage(true);
     renderExpenses(); notify('Imagen del justificante adjuntada al gasto.');
   } catch (error) { notify(`No se pudo adjuntar la imagen: ${error.message}`); }
 }
@@ -1026,6 +1096,7 @@ async function saveExpense(event) {
         notify(`No se guardó el gasto porque falló la imagen: ${error.message}`); return;
       }
     }
+    if (cloudMode && proofFile) refreshCloudUsage(true);
     renderExpenses(); closeExpenseModal(); notify(proofFile ? 'Gasto e imagen del justificante guardados.' : 'Gasto registrado.');
   } catch (error) { notify(`No se pudo registrar: ${error.message}`); }
 }
@@ -1147,7 +1218,7 @@ async function recordDecision(approved) {
 function registerEvents() {
   document.addEventListener('click', handleNavigation);
   $('#openTeamBtn')?.addEventListener('click', () => {
-    if (serverMode && user?.role === 'manager') openUserAdminModal();
+    if (hostedMode && user?.role === 'manager') openUserAdminModal();
     else openTeamModal();
   });
   $('#closeTeamModal')?.addEventListener('click', closeTeamModal);
@@ -1203,7 +1274,7 @@ function registerEvents() {
     if (remove) {
       const expense = expenses.find((item) => item.id === remove.dataset.removeExpenseProof);
       if (!expense || !window.confirm('¿Quitar la imagen del justificante de este gasto?')) return;
-      try { await backend.removeExpenseProof(expense); renderExpenses(); notify('Imagen del justificante eliminada.'); }
+      try { await backend.removeExpenseProof(expense); if (cloudMode) refreshCloudUsage(true); renderExpenses(); notify('Imagen del justificante eliminada.'); }
       catch (error) { notify(`No se pudo quitar la imagen: ${error.message}`); }
     }
   });
@@ -1242,7 +1313,7 @@ function registerEvents() {
     if (remove) {
       const order = orderById(activeOrderId); const photo = order?.evidence?.[Number(remove.dataset.removePhoto)];
       if (!photo || !window.confirm('¿Eliminar esta evidencia de la orden?')) return;
-      try { await backend.removePhoto(order, photo); renderAll(); notify('Evidencia eliminada.'); } catch (error) { notify(`No se pudo eliminar: ${error.message}`); }
+      try { await backend.removePhoto(order, photo); if (cloudMode) refreshCloudUsage(true); renderAll(); notify('Evidencia eliminada.'); } catch (error) { notify(`No se pudo eliminar: ${error.message}`); }
       return;
     }
     const deleteExpense = event.target.closest('[data-delete-expense]');
@@ -1267,27 +1338,30 @@ function registerEvents() {
 function updateStaticText() {
   $('#topDate').textContent = new Intl.DateTimeFormat('es-MX', { dateStyle: 'medium' }).format(new Date());
   const footer = $('.footer-note');
-  if (footer) footer.textContent = publicDemoBuild ? 'DEMO AISLADA · DATOS FICTICIOS · SIN SERVICIOS EXTERNOS' : cleanTestBuild ? 'PRUEBA LIMPIA · SIN DATOS PRECARGADOS · ALMACENAMIENTO LOCAL SEPARADO' : 'TALLER CONTROL · SQLITE LOCAL · ACCESO SOLO PARA TÉCNICOS';
+  if (footer) footer.textContent = publicDemoBuild ? 'DEMO AISLADA · DATOS FICTICIOS · SIN SERVICIOS EXTERNOS' : cleanTestBuild ? 'PRUEBA LIMPIA · SIN DATOS PRECARGADOS · ALMACENAMIENTO LOCAL SEPARADO' : cloudMode ? 'TALLER CONTROL · SUPABASE FREE · ACCESO SOLO PARA TÉCNICOS AUTORIZADOS' : 'TALLER CONTROL · SQLITE LOCAL · ACCESO SOLO PARA TÉCNICOS';
   $('#view-orders .page-sub').textContent = 'Busca, filtra y abre expedientes; imprime o guarda la orden como PDF.';
   const demoNote = $('#view-orders .demo-banner div');
   if (demoNote) demoNote.innerHTML = '<strong>Orden imprimible:</strong> genera una vista del expediente actual. La impresión contiene espacios de firma manuscrita; no es una firma electrónica.';
   const approvalIntro = $('#view-approval .page-sub');
   if (approvalIntro) approvalIntro.textContent = 'Prepara un borrador de correo o WhatsApp, o copia el texto para otro canal. El envío es manual; aquí registras la solicitud y la respuesta.';
   const ordersFoot = $('#view-orders .table-foot span:first-child');
-  if (ordersFoot) ordersFoot.textContent = localMode ? 'Datos locales de este navegador.' : 'Órdenes compartidas en la base SQLite local.';
+  if (ordersFoot) ordersFoot.textContent = localMode ? 'Datos locales de este navegador.' : cloudMode ? 'Órdenes compartidas en Supabase con políticas RLS.' : 'Órdenes compartidas en la base SQLite local.';
   const sideNote = $('.side-note p');
-  if (sideNote) sideNote.textContent = localMode ? 'Recepción, inspección, órdenes, aprobación interna y gastos; guardados en este navegador.' : 'Órdenes, gastos y evidencia compartidos en SQLite dentro de la red local del taller.';
+  if (sideNote) sideNote.textContent = localMode ? 'Recepción, inspección, órdenes, aprobación interna y gastos; guardados en este navegador.' : cloudMode ? 'Órdenes y gastos en Supabase Free; evidencia privada con límite interno. Revisa las cuotas del proveedor.' : 'Órdenes, gastos y evidencia compartidos en SQLite dentro de la red local del taller.';
   const storageCallout = $$('#view-reception .summary-card .callout').find((item) => item.textContent.includes('Almacenamiento local'));
   if (storageCallout && serverMode) storageCallout.innerHTML = '<strong>Almacenamiento del taller:</strong> esta recepción se comparte con las demás sesiones autorizadas en SQLite local.';
+  if (storageCallout && cloudMode) storageCallout.innerHTML = '<strong>Almacenamiento privado en Supabase:</strong> solo cuentas autorizadas acceden a órdenes y fotos; cada foto admite hasta 10 MB y hay un tope preventivo interno para evidencia.';
+  const homeNote = $('#view-home .demo-banner div');
+  if (homeNote && cloudMode) homeNote.innerHTML = '<strong>Modo en línea Supabase Free:</strong> la app muestra un aviso de uso y bloquea nuevas evidencias al alcanzar su límite interno; no es una alerta de facturación ni una garantía de costo cero. <span id="cloudUsageNotice">Consultando almacenamiento…</span>';
 }
 
 async function start() {
-  if (serverMode) {
+  if (hostedMode) {
     document.body.classList.add('server-locked');
     showAuth('signin');
     const message = $('#authMessage');
     message.className = 'auth-success';
-    message.textContent = 'Conectando con el servidor local…';
+    message.textContent = cloudMode ? (isSupabaseConfigured ? 'Conectando con Supabase…' : 'Falta configurar la URL y la llave publicable de Supabase para esta compilación.') : 'Conectando con el servidor local…';
     $('#localAuthForm').querySelectorAll('input, button').forEach((control) => { control.disabled = true; });
   }
   document.documentElement.classList.remove('app-pending');
@@ -1300,10 +1374,10 @@ async function start() {
   } catch (error) {
     console.error(error);
     setConnection('Error de conexión', 'offline');
-    if (serverMode) {
+    if (hostedMode) {
       showAuth('signin');
       const message = $('#authMessage');
-      message.textContent = `No se pudo contactar al servidor local: ${error.message}`;
+      message.textContent = `${cloudMode ? 'No se pudo contactar a Supabase' : 'No se pudo contactar al servidor local'}: ${error.message}`;
     } else notify(`No se pudo abrir el taller: ${error.message}`);
   }
 }

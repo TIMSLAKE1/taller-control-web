@@ -15,9 +15,13 @@
     "local": "npm run build && node server/index.js",
     "serve": "node server/index.js",
     "manager:init": "node server/users.js init-manager",
-    "test": "node --test"
+    "test": "node --test",
+    "build:cloud": "vite build --mode cloud"
   },
   "devDependencies": {
     "vite": "^6.0.0"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.119.0"
   }
 }
