@@ -34,6 +34,10 @@ const FLUID_NAMES = ['Aceite de motor', 'Refrigerante', 'Líquido de frenos', 'D
 const CATEGORIES = ['Refacciones', 'Insumos', 'Servicios externos', 'Herramientas', 'Operación', 'Otro'];
 const MAX_EXPENSE_PROOF_BYTES = 10 * 1024 * 1024;
 const EXPENSE_PROOF_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif', 'image/heic', 'image/heif']);
+function setOperationLabel() {
+  const label = $('#operationModeLabel');
+  if (label) label.textContent = cloudMode ? 'Operación en línea' : 'Operación local';
+}
 let user = null;
 let orders = [];
 let expenses = [];
@@ -244,6 +248,7 @@ function orderById(id) { return orders.find((order) => order.id === id); }
 
 const backend = {
   async boot() {
+    setOperationLabel();
     if (localMode) {
       orders = readLocal(LOCAL_ORDERS_KEY, null);
       if (!Array.isArray(orders)) orders = publicDemoBuild ? [demoOrder()] : [];
@@ -737,7 +742,7 @@ function renderDashboard() {
   const counts = $$('.flow-step .step-count', $('#view-home'));
   [orders.filter((o) => !['Cancelada'].includes(o.status)).length, inspections.length, ready.length, pending.length].forEach((value, index) => { if (counts[index]) counts[index].textContent = String(value).padStart(2, '0'); });
   const badge = $('#view-home .dashboard-grid .flow-head .badge');
-  if (badge) { badge.textContent = publicDemoBuild ? 'Demo aislada' : cleanTestBuild ? 'Prueba limpia' : 'SQLite local'; badge.className = `badge ${publicDemoBuild ? 'violet' : cleanTestBuild ? 'blue' : 'green'}`; }
+  if (badge) { badge.textContent = cloudMode ? 'Supabase Free' : publicDemoBuild ? 'Demo aislada' : cleanTestBuild ? 'Prueba limpia' : 'SQLite local'; badge.className = `badge ${cloudMode ? 'blue' : publicDemoBuild ? 'violet' : cleanTestBuild ? 'blue' : 'green'}`; }
   const banner = $('#view-home .demo-banner div');
   if (banner) banner.innerHTML = publicDemoBuild
     ? '<strong>Demostración:</strong> contiene un expediente inventado y separado de los datos operativos. Los cambios de esta demo se quedan en este navegador.'
