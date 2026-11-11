@@ -1,5 +1,5 @@
 import { buildApprovalMessage, buildEmailDraftUrl, buildWhatsAppDraftUrl } from './approval.js';
-import { getPrivateEvidence, isSupabaseConfigured, registerInitialAccount, supabaseRequest } from './supabase-backend.js';
+import { getPrivateEvidence, isSupabaseConfigured, supabaseRequest } from './supabase-backend.js';
 import { normalizeTechnicianNames } from './technician-roster.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -124,7 +124,7 @@ function lockExpiredSession() {
   if (!hostedMode || !user) return;
   user = null;
   clearInterval(refreshTimer);
-  showAuth('signin');
+  showAuth();
   const message = $('#authMessage');
   if (message) message.textContent = 'La sesión venció o fue revocada; vuelve a iniciar sesión.';
 }
@@ -270,7 +270,7 @@ const backend = {
     const session = await serverRequest('/api/session');
     user = session.user;
     if (!session.authenticated) {
-      showAuth('signin');
+      showAuth();
       setConnection('Inicia sesión', 'offline');
       return false;
     }
@@ -374,8 +374,7 @@ const backend = {
   }
 };
 
-function showAuth(mode) {
-  const registering = cloudMode && mode === 'register';
+function showAuth() {
   if (hostedMode) document.body.classList.add('server-locked');
   let backdrop = $('#authBackdrop');
   if (!backdrop) {
@@ -386,41 +385,15 @@ function showAuth(mode) {
   backdrop.setAttribute('role', 'dialog');
   backdrop.setAttribute('aria-modal', 'true');
   const intro = cloudMode
-    ? registering
-      ? 'El registro no concede acceso por sí solo. Solo el correo propietario configurado puede activar al primer encargado; las cuentas de técnicos se autorizan mediante invitación.'
-      : 'Acceso reservado al encargado y a técnicos autorizados. No hay acceso abierto a órdenes, gastos ni evidencia.'
-    : 'Acceso reservado al encargado y a técnicos con cuenta autorizada. No hay registro abierto; solicita acceso al encargado del taller.';
-  const fields = registering
-    ? `<div class="field"><label for="authDisplayName">Nombre</label><input id="authDisplayName" autocomplete="name" maxlength="100" required /></div><div class="field"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" autocomplete="username" required /></div><div class="field"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" autocomplete="new-password" minlength="12" maxlength="200" required /><div class="hint">Al menos 12 caracteres.</div></div><div class="field"><label for="authPasswordAgain">Confirmar contraseña</label><input id="authPasswordAgain" type="password" autocomplete="new-password" minlength="12" maxlength="200" required /></div>`
-    : `<div class="field"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" autocomplete="username" required /></div><div class="field"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" autocomplete="current-password" required /></div>`;
-  backdrop.innerHTML = `<section class="auth-panel"><div class="eyebrow"><span class="dot"></span>${cloudMode ? 'Acceso seguro · Supabase Free' : 'Acceso al taller · red local'}</div><h2>${registering ? 'Crear cuenta inicial' : 'Iniciar sesión'}</h2><p class="intro">${intro}</p><form id="localAuthForm">${fields}<div class="auth-actions"><button class="btn" id="authSubmit" type="submit">${registering ? 'Crear cuenta' : 'Entrar'}</button>${cloudMode ? `<button class="text-btn" type="button" id="toggleAuthMode">${registering ? 'Volver al acceso' : 'Crear cuenta inicial'}</button>` : ''}</div><div id="authMessage" class="auth-error" role="status" aria-live="polite"></div></form></section>`;
+    ? 'Acceso reservado al encargado y a técnicos autorizados. No hay acceso abierto a órdenes, gastos ni evidencia.'
+    : 'Acceso reservado al encargado y a técnicos con cuenta autorizada. Solicita acceso al encargado del taller.';
+  backdrop.innerHTML = `<section class="auth-panel"><div class="eyebrow"><span class="dot"></span>${cloudMode ? 'Acceso seguro · Supabase Free' : 'Acceso al taller · red local'}</div><h2>Iniciar sesión</h2><p class="intro">${intro}</p><form id="localAuthForm"><div class="field"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" autocomplete="username" required /></div><div class="field"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" autocomplete="current-password" required /></div><div class="auth-actions"><button class="btn" id="authSubmit" type="submit">Entrar</button></div><div id="authMessage" class="auth-error" role="status" aria-live="polite"></div></form></section>`;
   $('#localAuthForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const message = $('#authMessage');
     const email = $('#authEmail').value.trim();
     const password = $('#authPassword').value;
     const button = $('#authSubmit');
-    if (registering) {
-      if (password !== $('#authPasswordAgain').value) {
-        message.className = 'auth-error'; message.textContent = 'Las contraseñas no coinciden.'; return;
-      }
-      button.disabled = true;
-      message.className = 'auth-success'; message.textContent = 'Creando cuenta…';
-      try {
-        const result = await registerInitialAccount({ email, password, display_name: $('#authDisplayName').value.trim() });
-        showAuth('signin');
-        $('#authEmail').value = email;
-        const status = $('#authMessage');
-        status.className = 'auth-success';
-        status.textContent = result.confirmation_required
-          ? 'Cuenta creada. Confirma el correo recibido y después inicia sesión; el encargado inicial se habilita solo para el correo propietario configurado.'
-          : 'Cuenta creada. Inicia sesión; el encargado inicial se habilita solo para el correo propietario configurado.';
-      } catch (error) {
-        message.className = 'auth-error'; message.textContent = error.message || 'No se pudo crear la cuenta.';
-        button.disabled = false;
-      }
-      return;
-    }
     button.disabled = true;
     message.className = 'auth-success'; message.textContent = 'Conectando…';
     try {
@@ -436,7 +409,6 @@ function showAuth(mode) {
     } catch (error) { message.className = 'auth-error'; message.textContent = error.message || 'No se pudo iniciar sesión.'; }
     finally { button.disabled = false; }
   });
-  $('#toggleAuthMode')?.addEventListener('click', () => showAuth(registering ? 'signin' : 'register'));
 }
 function hideAuth() { $('#authBackdrop')?.remove(); document.body.classList.remove('server-locked'); }
 
@@ -489,7 +461,7 @@ function setupTeamUi() {
 
 function setupAuthorizedUsersUi() {
   if ($('#userAdminModal')) return;
-  document.body.insertAdjacentHTML('beforeend', `<div class="modal-backdrop" id="userAdminModal"><div class="modal user-admin-modal" role="dialog" aria-modal="true" aria-labelledby="userAdminTitle"><div class="modal-head"><h2 id="userAdminTitle">Usuarios autorizados</h2><button class="icon-btn" type="button" id="closeUserAdmin" aria-label="Cerrar">×</button></div><p>Agrega técnicos con una cuenta propia o desactiva su acceso. No hay registro público ni se envían invitaciones.</p><div class="callout" style="margin-top:10px"><strong>Tu cuenta de encargado también es de técnico autorizado:</strong> puedes usar todas las funciones operativas y no se puede desactivar desde esta pantalla.</div><form id="authorizedUserForm"><div class="field-grid"><div class="field"><label for="authorizedUserName">Nombre del técnico</label><input id="authorizedUserName" maxlength="100" autocomplete="name" required /></div><div class="field"><label for="authorizedUserEmail">Correo electrónico</label><input id="authorizedUserEmail" type="email" maxlength="254" autocomplete="username" required /></div><div class="field"><label for="authorizedUserPassword">Contraseña inicial</label><input id="authorizedUserPassword" type="password" minlength="12" maxlength="200" autocomplete="new-password" required /><span class="hint">Al menos 12 caracteres.</span></div><div class="field"><label for="authorizedUserPasswordAgain">Confirmar contraseña</label><input id="authorizedUserPasswordAgain" type="password" minlength="12" maxlength="200" autocomplete="new-password" required /></div></div><div class="modal-actions"><button class="btn btn-teal" id="addAuthorizedUserBtn" type="submit">Agregar técnico</button></div><div id="userAdminMessage" class="auth-error" role="status" aria-live="polite"></div></form><div class="user-admin-list-head"><strong>Técnicos</strong><span id="authorizedUserCount" class="badge gray">0 cuentas</span></div><div id="authorizedUsersList" class="user-admin-list"></div><div class="callout" style="margin-top:12px"><strong>Control de acceso:</strong> entrega la contraseña inicial al técnico por un canal privado. Al desactivarlo se revocan sus sesiones; sus registros históricos se conservan.</div></div></div>`);
+  document.body.insertAdjacentHTML('beforeend', `<div class="modal-backdrop" id="userAdminModal"><div class="modal user-admin-modal" role="dialog" aria-modal="true" aria-labelledby="userAdminTitle"><div class="modal-head"><h2 id="userAdminTitle">Usuarios autorizados</h2><button class="icon-btn" type="button" id="closeUserAdmin" aria-label="Cerrar">×</button></div><p>Agrega técnicos solo desde aquí: el encargado define la contraseña inicial y confirma el correo sin enviar mensajes. Verifica que la dirección pertenezca al técnico; no hay registro público.</p><div class="callout" style="margin-top:10px"><strong>Tu cuenta de encargado también es de técnico autorizado:</strong> puedes usar todas las funciones operativas y no se puede desactivar desde esta pantalla.</div><form id="authorizedUserForm"><div class="field-grid"><div class="field"><label for="authorizedUserName">Nombre del técnico</label><input id="authorizedUserName" maxlength="100" autocomplete="name" required /></div><div class="field"><label for="authorizedUserEmail">Correo electrónico</label><input id="authorizedUserEmail" type="email" maxlength="254" autocomplete="username" required /></div><div class="field"><label for="authorizedUserPassword">Contraseña inicial</label><input id="authorizedUserPassword" type="password" minlength="12" maxlength="200" autocomplete="new-password" required /><span class="hint">Al menos 12 caracteres.</span></div><div class="field"><label for="authorizedUserPasswordAgain">Confirmar contraseña</label><input id="authorizedUserPasswordAgain" type="password" minlength="12" maxlength="200" autocomplete="new-password" required /></div></div><div class="modal-actions"><button class="btn btn-teal" id="addAuthorizedUserBtn" type="submit">Agregar técnico</button></div><div id="userAdminMessage" class="auth-error" role="status" aria-live="polite"></div></form><div class="user-admin-list-head"><strong>Técnicos</strong><span id="authorizedUserCount" class="badge gray">0 cuentas</span></div><div id="authorizedUsersList" class="user-admin-list"></div><div class="callout" style="margin-top:12px"><strong>Control de acceso:</strong> verifica el correo y entrega la contraseña inicial por un canal privado. Supabase marca el correo como confirmado por acción del encargado, sin enviar un mensaje. Al desactivar la cuenta se revocan sus sesiones y se conservan sus registros históricos.</div></div></div>`);
 }
 
 function renderAuthorizedUsers() {
@@ -544,7 +516,7 @@ async function addAuthorizedUser(event) {
     } });
     $('#authorizedUserForm').reset();
     await refreshAuthorizedUsers();
-    message.className = 'auth-success'; message.textContent = 'Cuenta creada. Comparte la contraseña inicial con el técnico por un canal privado.';
+    message.className = 'auth-success'; message.textContent = 'Cuenta creada y correo confirmado por acción del encargado. Comparte la contraseña inicial con el técnico por un canal privado.';
   } catch (error) {
     message.className = 'auth-error'; message.textContent = error.message;
   } finally { button.disabled = false; }
@@ -1415,7 +1387,7 @@ function updateStaticText() {
 async function start() {
   if (hostedMode) {
     document.body.classList.add('server-locked');
-    showAuth('signin');
+    showAuth();
     const message = $('#authMessage');
     message.className = 'auth-success';
     message.textContent = cloudMode ? (isSupabaseConfigured ? 'Conectando con Supabase…' : 'Falta configurar la URL y la llave publicable de Supabase para esta compilación.') : 'Conectando con el servidor local…';
@@ -1432,7 +1404,7 @@ async function start() {
     console.error(error);
     setConnection('Error de conexión', 'offline');
     if (hostedMode) {
-      showAuth('signin');
+      showAuth();
       const message = $('#authMessage');
       message.textContent = `${cloudMode ? 'No se pudo contactar a Supabase' : 'No se pudo contactar al servidor local'}: ${error.message}`;
     } else notify(`No se pudo abrir el taller: ${error.message}`);

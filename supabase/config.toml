@@ -1,0 +1,2 @@
+[functions.create-technician]
+verify_jwt = true

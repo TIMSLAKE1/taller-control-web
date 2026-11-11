@@ -16,12 +16,6 @@ const supabase = isSupabaseConfigured
     })
   : null;
 
-const temporaryAuth = isSupabaseConfigured
-  ? createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false, flowType: 'pkce' }
-    })
-  : null;
-
 function client() {
   if (!supabase) throw apiError('Falta configurar VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY para la compilación estática.', 503);
   return supabase;
@@ -117,63 +111,27 @@ async function validImage(file) {
   if (!valid) throw apiError('El contenido del archivo no coincide con su formato de imagen.', 415);
 }
 
-function randomToken() {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
-}
-
-async function sha256(value) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
-}
-
-async function registerAccount(body) {
-  const email = String(body.email || '').trim().toLowerCase();
-  const displayName = String(body.display_name || '').trim();
-  const password = typeof body.password === 'string' ? body.password : '';
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw apiError('Escribe un correo electrónico válido.', 400);
-  if (displayName.length < 2 || displayName.length > 100) throw apiError('El nombre debe tener entre 2 y 100 caracteres.', 400);
-  if (password.length < 12 || password.length > 200) throw apiError('La contraseña debe tener entre 12 y 200 caracteres.', 400);
-  const { data, error } = await temporaryAuth.auth.signUp({
-    email,
-    password,
-    options: { data: { display_name: displayName }, emailRedirectTo: window.location.origin }
-  });
-  if (error) throw translateError(error);
-  return { created: Boolean(data?.user), confirmation_required: !data?.session };
-}
-
-async function inviteTechnician(body) {
-  const manager = await activeSessionProfile();
-  if (!manager?.is_manager) throw apiError('Solo el encargado puede administrar las cuentas de técnicos.', 403);
-  const email = String(body.email || '').trim().toLowerCase();
-  const displayName = String(body.display_name || '').trim();
-  const password = typeof body.password === 'string' ? body.password : '';
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw apiError('Escribe un correo electrónico válido.', 400);
-  if (displayName.length < 2 || displayName.length > 100) throw apiError('El nombre debe tener entre 2 y 100 caracteres.', 400);
-  if (password.length < 12 || password.length > 200) throw apiError('La contraseña debe tener entre 12 y 200 caracteres.', 400);
-
-  const token = randomToken();
-  const tokenHash = await sha256(token);
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
-  const db = client();
-  const { error: deleteError } = await db.from('technician_invitations').delete().eq('email', email).is('accepted_at', null);
-  if (deleteError) throw translateError(deleteError);
-  const { error: insertError } = await db.from('technician_invitations').insert({
-    email, display_name: displayName, token_hash: tokenHash, created_by: manager.id, expires_at: expiresAt
-  });
-  if (insertError) throw translateError(insertError);
-
-  const { data, error } = await temporaryAuth.auth.signUp({
-    email,
-    password,
-    options: { data: { display_name: displayName, invitation_token: token }, emailRedirectTo: window.location.origin }
-  });
-  if (error || !data?.user) {
-    await db.from('technician_invitations').delete().eq('email', email).eq('token_hash', tokenHash);
-    throw translateError(error || apiError('No se pudo crear la cuenta autorizada.', 500));
+async function createTechnician(body) {
+  const { data, error } = await client().functions.invoke('create-technician', { body });
+  if (error) {
+    let message = error.message || 'No se pudo crear la cuenta autorizada.';
+    let status = 500;
+    const response = error.context;
+    if (response && typeof response.clone === 'function') {
+      status = Number(response.status) || status;
+      try {
+        const payload = await response.clone().json();
+        if (typeof payload?.error === 'string') message = payload.error;
+      } catch { /* Mantener el mensaje genérico del SDK si la respuesta no es JSON. */ }
+    }
+    if (/already registered|already exists|duplicate key/i.test(message)) {
+      message = 'Ya existe una cuenta con ese correo. Si está desactivada, reactívala desde Administración de usuarios.';
+      status = 409;
+    }
+    throw apiError(message, status, error.code || '');
   }
-  return { user: { id: data.user.id, email, display_name: displayName, role: 'mechanic', is_technician: true } };
+  if (!data?.user) throw apiError('La función no confirmó la creación de la cuenta.', 502);
+  return data;
 }
 
 async function loadData() {
@@ -352,14 +310,13 @@ async function apiRequest(rawUrl, options = {}) {
       const profile = await activeSessionProfile();
       return { authenticated: Boolean(profile), user: profile ? publicUser(profile) : null };
     }
-    if (pathname === '/api/auth/register' && method === 'POST') return await registerAccount(body || {});
     if (pathname === '/api/auth/login' && method === 'POST') {
       const email = String(body?.email || '').trim().toLowerCase();
       const password = typeof body?.password === 'string' ? body.password : '';
       const { error } = await db.auth.signInWithPassword({ email, password });
-      if (error) throw translateError(apiError('Correo o contraseña incorrectos, o cuenta aún no verificada.', 401));
+      if (error) throw translateError(apiError('Correo o contraseña incorrectos, o cuenta no disponible.', 401));
       const profile = await activeSessionProfile();
-      if (!profile) throw apiError('La cuenta todavía no está autorizada. El encargado debe agregarla; la cuenta inicial solo se activa con el correo propietario y correo verificado.', 403);
+      if (!profile) throw apiError('La cuenta todavía no está autorizada. El encargado debe agregarla o reactivarla desde Administración de usuarios.', 403);
       return { user: publicUser(profile) };
     }
     if (pathname === '/api/auth/logout' && method === 'POST') {
@@ -381,7 +338,7 @@ async function apiRequest(rawUrl, options = {}) {
       if (error) throw translateError(error);
       return { users: data || [] };
     }
-    if (pathname === '/api/admin/users' && method === 'POST') return await inviteTechnician(body || {});
+    if (pathname === '/api/admin/users' && method === 'POST') return await createTechnician(body || {});
     const userMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
     if (userMatch && method === 'PATCH') {
       const { data, error } = await db.rpc('set_technician_active', { p_user_id: decodeURIComponent(userMatch[1]), p_active: Boolean(body?.active) });
@@ -422,8 +379,6 @@ async function apiRequest(rawUrl, options = {}) {
 export async function supabaseRequest(url, options) {
   return apiRequest(url, options);
 }
-
-export { registerAccount as registerInitialAccount };
 
 export async function getPrivateEvidence(kind, id) {
   return downloadPrivateEvidence(kind, id);
