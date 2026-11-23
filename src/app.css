@@ -17,4 +17,3 @@
 
 /* Fondo animado detrás del acceso; la tarjeta conserva fondo blanco y legibilidad. */
 .auth-backdrop{background-color:#0f1f309c;background-image:linear-gradient(rgba(15,31,48,.58),rgba(15,31,48,.58)),url('/taller-control-login.webp');background-position:center;background-repeat:no-repeat;background-size:cover}
-@media(prefers-reduced-motion:reduce){.auth-backdrop{background-image:linear-gradient(rgba(15,31,48,.58),rgba(15,31,48,.58)),url('/taller-control-login-poster.jpg')}}
